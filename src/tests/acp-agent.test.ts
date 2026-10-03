@@ -42,6 +42,7 @@ import {
   createFastModeConfigOption,
   discoverCustomAgents,
   runPromptWithCancellation,
+  isReplayHiddenMetaMessage,
   type AcpClient,
   type SDKMessageFilter,
   type SteerRequest,
@@ -1741,6 +1742,117 @@ describe("isLocalCommandMetadata", () => {
         { type: "text", text: "hi" },
       ]),
     ).toBe(false);
+  });
+});
+
+describe("meta messages from other agents, sessions and channels", () => {
+  // The shape SDK 0.3.284 getSessionMessages returns for a host-injected peer
+  // message (live probe): is_meta plus origin, content is the full framing.
+  const peerMessage = {
+    type: "user",
+    uuid: "peer-1",
+    session_id: "s1",
+    parent_tool_use_id: null,
+    parent_agent_id: null,
+    is_meta: true,
+    origin: { kind: "peer", from: "uds:/tmp/fake.sock", hostInjected: true },
+    message: {
+      role: "user",
+      content:
+        'Another Claude session sent a message:\n<cross-session-message from="uds:/tmp/fake.sock">enveloped hi</cross-session-message>\n\nThis came from another Claude session — not typed by your user.',
+    },
+  };
+
+  it("isReplayHiddenMetaMessage matches only meta messages with an inter-agent origin", () => {
+    expect(isReplayHiddenMetaMessage(peerMessage)).toBe(true);
+    for (const kind of ["channel", "observer", "observer-activity", "slack-ping"]) {
+      expect(isReplayHiddenMetaMessage({ ...peerMessage, origin: { kind } })).toBe(true);
+    }
+    // Not meta: an un-framed message persisted as a normal user turn.
+    expect(isReplayHiddenMetaMessage({ ...peerMessage, is_meta: undefined })).toBe(false);
+    // Meta without an inter-agent origin, such as a compact summary.
+    expect(
+      isReplayHiddenMetaMessage({ ...peerMessage, origin: undefined, isCompactSummary: true }),
+    ).toBe(false);
+    expect(isReplayHiddenMetaMessage({ ...peerMessage, origin: { kind: "human" } })).toBe(false);
+    expect(isReplayHiddenMetaMessage({ ...peerMessage, type: "assistant" })).toBe(false);
+    expect(isReplayHiddenMetaMessage(undefined)).toBe(false);
+  });
+
+  it("loadSession replay skips them but keeps the user's own prompt", async () => {
+    const updates: SessionNotification[] = [];
+    const client = {
+      sessionUpdate: async (u: SessionNotification) => {
+        updates.push(u);
+      },
+    } as unknown as AcpClient;
+    const agent = new ClaudeAcpAgent(client, { log: () => {}, error: () => {} });
+
+    vi.mocked(getSessionMessages).mockResolvedValueOnce([
+      {
+        type: "user",
+        uuid: "u1",
+        session_id: "s1",
+        parent_tool_use_id: null,
+        parent_agent_id: null,
+        message: { role: "user", content: [{ type: "text", text: "hi, say one word" }] },
+      },
+      peerMessage,
+    ] as Awaited<ReturnType<typeof getSessionMessages>>);
+
+    await (
+      agent as unknown as { replaySessionHistory(sessionId: string): Promise<void> }
+    ).replaySessionHistory("s1");
+
+    expect(
+      updates.some(
+        (u) =>
+          u.update.sessionUpdate === "user_message_chunk" &&
+          u.update.content.type === "text" &&
+          u.update.content.text.includes("hi, say one word"),
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(updates)).not.toContain("cross-session-message");
+    expect(JSON.stringify(updates)).not.toContain("Another Claude session");
+  });
+
+  it("drops a persisted task-notification but keeps the text typed beside it", async () => {
+    // Upstream #1205's replay half: live, the SDK task_notification frame
+    // reports the stop and the prompt loop never shows the record; replay used
+    // to hand the raw XML to the client as a prompt.
+    const updates: SessionNotification[] = [];
+    const client = {
+      sessionUpdate: async (u: SessionNotification) => {
+        updates.push(u);
+      },
+    } as unknown as AcpClient;
+    const agent = new ClaudeAcpAgent(client, { log: () => {}, error: () => {} });
+
+    vi.mocked(getSessionMessages).mockResolvedValueOnce([
+      {
+        type: "user",
+        uuid: "u1",
+        session_id: "s1",
+        parent_tool_use_id: null,
+        parent_agent_id: null,
+        message: {
+          role: "user",
+          content:
+            "<task-notification>\n<task-id>bg-1</task-id>\n<status>completed</status>\n" +
+            "<summary>Background task finished</summary>\n<result>raw output</result>\n" +
+            "</task-notification>\nand now summarise it",
+        },
+      },
+    ] as Awaited<ReturnType<typeof getSessionMessages>>);
+
+    await (
+      agent as unknown as { replaySessionHistory(sessionId: string): Promise<void> }
+    ).replaySessionHistory("s1");
+
+    const text = JSON.stringify(updates);
+    expect(text).not.toContain("task-notification");
+    expect(text).not.toContain("raw output");
+    expect(text).toContain("and now summarise it");
   });
 });
 

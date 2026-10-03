@@ -1471,8 +1471,12 @@ const LOCAL_COMMAND_MARKERS = [
 // whatever the user typed. Nobody wrote it and no client sees it live — the
 // prompt loop's user-message skip covers the whole message — but it is
 // persisted alongside that prose, so replay would hand the client a prompt
-// with instructions in it the user never gave.
-const INJECTED_CONTEXT_MARKERS = ["system-reminder"].map((tag) => ({
+// with instructions in it the user never gave. A `task-notification` tells the
+// model that a background task stopped; live, the SDK `task_notification`
+// frame reports the same stop, so replay drops it rather than showing the raw
+// XML as a prompt (upstream #1205; restoring the task's state from it, as
+// upstream does, needs a runtime this fork does not carry).
+const INJECTED_CONTEXT_MARKERS = ["system-reminder", "task-notification"].map((tag) => ({
   open: `<${tag}>`,
   close: `</${tag}>`,
 }));
@@ -1574,6 +1578,42 @@ export function stripLocalCommandMetadata(content: unknown): unknown | null {
   }
   if (kept.length === 0) return null;
   return kept;
+}
+
+/** Origin kinds of the meta user messages `getSessionMessages` returns since
+ *  SDK 0.3.284 (messages from other agents, sessions and channels). */
+const REPLAY_HIDDEN_META_ORIGIN_KINDS = new Set([
+  "peer",
+  "channel",
+  "observer",
+  "observer-activity",
+  "slack-ping",
+]);
+
+/**
+ * True for a transcript message delivered to the model from another agent,
+ * session or channel. Since SDK 0.3.284 `getSessionMessages` returns these as
+ * `is_meta` user messages whose content is the full harness framing (envelope
+ * XML plus the "not typed by your user" preamble). The live prompt loop never
+ * renders them, so replay skips them too rather than presenting them as text
+ * the user typed. Other `is_meta` messages (compact summaries) are kept.
+ * Ported from upstream #1208.
+ *
+ * `is_meta` and `origin` are runtime fields not declared on `SessionMessage`.
+ */
+export function isReplayHiddenMetaMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object") return false;
+  const { type, is_meta, origin } = message as {
+    type?: unknown;
+    is_meta?: unknown;
+    origin?: { kind?: unknown } | null;
+  };
+  return (
+    type === "user" &&
+    is_meta === true &&
+    typeof origin?.kind === "string" &&
+    REPLAY_HIDDEN_META_ORIGIN_KINDS.has(origin.kind)
+  );
 }
 
 export function isLocalCommandMetadata(content: unknown): boolean {
@@ -6334,6 +6374,9 @@ export class ClaudeAcpAgent {
     const replayFileChangeAuditToolUseIds = new Set<string>();
 
     for (const message of messages) {
+      if (isReplayHiddenMetaMessage(message)) {
+        continue;
+      }
       if (
         message.type === "user" &&
         message.parent_tool_use_id === null &&
