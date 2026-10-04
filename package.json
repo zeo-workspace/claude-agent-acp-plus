@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.23.6",
+  "version": "0.24.0",
   "description": "Claude Code in Zed and other ACP clients with the VS Code extension's UX — multi-select questions, refusal consent, live quota windows, background tasks, Ultracode effort and session notices. Fork of claude-agent-acp.",
   "main": "dist/lib.js",
   "types": "dist/lib.d.ts",

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.24.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.23.6...v0.24.0) (2026-10-04)
+
+
+### Features
+
+* **012:** answer _claude/tasks/stop and /background; progress summaries opt-in ([d686ccd](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/d686ccd84a16a4ac6711e580f1fe27abbb282706))
+* **012:** publish the agent's task feed as _claude/tasks ([712917f](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/712917f7222df41b219080b880628aa5464b477d))
+
+
+### Bug Fixes
+
+* **012:** publish task usage as whole, non-negative numbers ([ed8b008](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/ed8b008902773b20e877718135861094932553bf))
+
+
+### Documentation
+
+* **012:** document the task feed, its two methods and the summaries switch ([ca380e4](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/ca380e478fc190ffb72206c3b937583435eb4370))
+
 ## [0.23.6](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.23.5...v0.23.6) (2026-10-04)
 
 
