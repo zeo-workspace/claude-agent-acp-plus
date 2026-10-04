@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.23.4",
+  "version": "0.23.5",
   "description": "ACP adapter for the Claude Agent SDK with VS Code-parity UX for Zed and other ACP clients — checkbox multi-select questions, refusal consent dialog, dynamic agent name. Fork of claude-agent-acp.",
   "main": "dist/lib.js",
   "types": "dist/lib.d.ts",
