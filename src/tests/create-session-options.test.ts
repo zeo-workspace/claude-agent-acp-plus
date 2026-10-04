@@ -658,6 +658,57 @@ describe("createSession options merging", () => {
     });
   });
 
+  describe("permission mode of a resumed session (upstream #1218)", () => {
+    const SESSION = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let configDir: string;
+
+    function resumeWith(lastMode: string, opts: { permissionMode?: string } = {}) {
+      configDir = fs.mkdtempSync(path.join(os.tmpdir(), "resume-mode-"));
+      const dir = path.join(configDir, "projects", "-tmp");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, `${SESSION}.jsonl`),
+        JSON.stringify({
+          type: "user",
+          origin: { kind: "human" },
+          permissionMode: lastMode,
+          message: { role: "user", content: "hi" },
+        }) + "\n",
+      );
+      return (
+        agent as unknown as {
+          createSession: (params: object, opts: object) => Promise<unknown>;
+        }
+      ).createSession(
+        {
+          cwd: process.cwd(),
+          mcpServers: [],
+          _meta: { claudeCode: { options: { env: { CLAUDE_CONFIG_DIR: configDir } } } },
+        },
+        { resume: SESSION, ...opts },
+      );
+    }
+
+    afterEach(() => {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    });
+
+    it("starts the resumed query in the transcript's last mode", async () => {
+      await resumeWith("acceptEdits");
+      expect(capturedOptions?.permissionMode).toBe("acceptEdits");
+    });
+
+    it("falls back to the settings default for a mode it cannot offer", async () => {
+      await resumeWith("no-such-mode");
+      expect(capturedOptions?.permissionMode).toBe("default");
+    });
+
+    it("lets an explicit mode win over the transcript", async () => {
+      await resumeWith("acceptEdits", { permissionMode: "plan" });
+      expect(capturedOptions?.permissionMode).toBe("plan");
+    });
+  });
+
   describe("session/close right after session/new (upstream #1216)", () => {
     it("answers at once and closes the query", async () => {
       const { sessionId } = await agent.newSession({ cwd: process.cwd(), mcpServers: [] });

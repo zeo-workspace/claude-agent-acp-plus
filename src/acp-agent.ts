@@ -94,7 +94,11 @@ import {
   toGoalSnapshot,
 } from "./goal-extension.js";
 import { sanitizeTitle, SessionTitles } from "./session-titles.js";
-import { readResumedSession, type ResumedSessionSnapshot } from "./resumed-session.js";
+import {
+  readResumedPermissionMode,
+  readResumedSession,
+  type ResumedSessionSnapshot,
+} from "./resumed-session.js";
 import { SessionTiming } from "./session-timing.js";
 import { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { BetaContentBlock, BetaRawContentBlockDelta } from "@anthropic-ai/sdk/resources/beta.mjs";
@@ -7855,7 +7859,7 @@ export class ClaudeAcpAgent {
       this.logger,
       allowBypass,
     );
-    const initialPermissionMode =
+    let initialPermissionMode =
       creationOpts.permissionMode === "bypassPermissions" && !allowBypass
         ? "default"
         : (creationOpts.permissionMode ?? permissionMode);
@@ -7998,6 +8002,34 @@ export class ClaudeAcpAgent {
       // Opt-in to session state events like when the agent is idle
       CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
     };
+
+    // A resume or load continues in the mode of the transcript's last prompt
+    // (upstream #1218), read from the configuration home this query runs with
+    // -- an account overlay keeps its transcripts there. An explicit mode still
+    // wins; a recorded mode this session cannot offer (bypass, here) falls back
+    // to the settings default above.
+    if (creationOpts.resume !== undefined && creationOpts.permissionMode === undefined) {
+      const resumedMode = await readResumedPermissionMode(
+        creationOpts.resume,
+        (env as Record<string, string | undefined>).CLAUDE_CONFIG_DIR ?? CLAUDE_CONFIG_DIR,
+        this.logger,
+      );
+      if (resumedMode !== undefined) {
+        let rejected = false;
+        const mode = resolvePermissionMode(
+          resumedMode,
+          { error: () => (rejected = true) },
+          allowBypass,
+        );
+        if (rejected) {
+          this.logger.error(
+            `Ignoring permission mode "${resumedMode}" of the resumed transcript: not available in this session.`,
+          );
+        } else {
+          initialPermissionMode = mode;
+        }
+      }
+    }
     // Scopes the context-window cache to this query's backend (see
     // `contextWindowCache`). Derived from the same `env` object handed to the
     // SDK, so per-session `_meta` env routing and ambient process-env routing
@@ -8508,7 +8540,12 @@ export class ClaudeAcpAgent {
         this.logger.log(`Recreating Claude session ${sessionId} for provider update`);
         this.closeQueryStream(session);
         delete this.sessions[sessionId];
-        await this.createSession(session.creationParams, { resume: sessionId });
+        // Keep the mode the session is in now; without it the resume would
+        // read the transcript's last prompt, which predates a later switch.
+        await this.createSession(session.creationParams, {
+          resume: sessionId,
+          permissionMode: session.modes.currentModeId as PermissionMode,
+        });
       }
     });
     this.providerUpdate = update;
