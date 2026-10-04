@@ -240,6 +240,7 @@ import {
 
 export { DEFAULT_AGENT_ID, EFFORT_CONFIG_ID } from "./session-config-ids.js";
 import { MODE_CONFIG_ID, SessionModeManager } from "./session-mode.js";
+import { TASKS_META_KEY, TaskFeed, TaskFeedPublisher } from "./task-feed.js";
 
 export const CLAUDE_CONFIG_DIR =
   process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
@@ -344,6 +345,10 @@ type SteerMeta = {
  *  reports in `background_tasks_changed`, so a client can tell an idle thread
  *  from one whose turn ended while a shell or subagent keeps running. */
 export const BACKGROUND_TASKS_META_KEY = "_claude/backgroundTasks";
+/** `session_info_update._meta` key carrying the task feed snapshot
+ *  (story 012) — see `task-feed.ts`. Published beside, never instead of,
+ *  {@link BACKGROUND_TASKS_META_KEY}. */
+export { TASKS_META_KEY };
 
 export type SteerRequest = {
   sessionId: string;
@@ -387,6 +392,18 @@ function parseSteerRequest(params: unknown): SteerRequest {
     prompt: prompt as PromptRequest["prompt"],
     _meta: _meta as SteerMeta | null | undefined,
   };
+}
+
+/** The SDK's own text for a rejected control request, passed through to the
+ *  client as the internal error's message (R2.4). */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** A value made safe for one `key=value` field: ids come from the client and
+ *  could otherwise carry a space, a newline or an `=` that forges a field. */
+function logValue(value: string): string {
+  return value.replace(/[\s=]+/g, "_");
 }
 
 /** Internal model-selection state. Mirrors the shape the ACP SDK exposed as
@@ -968,6 +985,13 @@ export type Session = {
       endedPerLevel?: "ended" | "sweep-armed";
     }
   >;
+  /** The task feed (story 012): every task message folded into the
+   *  `_claude/tasks` snapshot, published through `taskFeedPublisher`. Both
+   *  live as long as the SESSION, not the consumer — a query recreate keeps
+   *  them, because the restart's `interrupted` endings must go out through
+   *  them (R1.9). Absent only on hand-built test sessions. */
+  taskFeed?: TaskFeed;
+  taskFeedPublisher?: TaskFeedPublisher;
   /** Whether any top-level assistant text reached the client since the last
    *  stretch boundary. Set as a side effect of sending in the consumer's
    *  `sendUpdate`, never at an emission site; read at the terminal `result`
@@ -4296,7 +4320,9 @@ export class ClaudeAcpAgent {
               case "hook_progress":
               case "hook_response":
               case "files_persisted":
+                break;
               case "task_progress":
+                session.taskFeedPublisher?.notify(session.taskFeed!.onProgress(message));
                 break;
               case "task_started":
                 // For subagent tasks `task_id` is the subagent's agent id (the
@@ -4324,11 +4350,13 @@ export class ClaudeAcpAgent {
                 if (message.subagent_type && session.activeTurn && !session.activeTurn.settled) {
                   (session.activeTurn.spawnedTaskIds ??= new Set()).add(message.task_id);
                 }
+                session.taskFeedPublisher?.notify(session.taskFeed!.onStarted(message));
                 break;
               case "task_notification":
                 // The task settled — no further tool calls can originate
                 // from it, so its registry entry can be dropped.
                 session.liveBackgroundTasks.delete(message.task_id);
+                session.taskFeedPublisher?.notify(session.taskFeed!.onNotification(message));
                 break;
               case "task_updated":
                 // terminal-status task_updated patch and a (deduplicated)
@@ -4343,6 +4371,7 @@ export class ClaudeAcpAgent {
                 ) {
                   session.liveBackgroundTasks.delete(message.task_id);
                 }
+                session.taskFeedPublisher?.notify(session.taskFeed!.onUpdated(message));
                 break;
               case "worker_shutting_down":
                 // Defer until stream end. The announcement is durable and may be
@@ -4547,6 +4576,7 @@ export class ClaudeAcpAgent {
                 // (watchers, skip_transcript work) are excluded because the
                 // SDK marks them as "not activity" for exactly this use.
                 await publishBackgroundTasks(message.tasks.filter((task) => !task.ambient));
+                session.taskFeedPublisher?.notify(session.taskFeed!.onLevel(message.tasks));
                 break;
               default:
                 unreachable(message, this.logger);
@@ -6172,6 +6202,53 @@ export class ClaudeAcpAgent {
     session.settingsManager.dispose();
     session.input.end();
     session.query.close();
+    this.retireTaskFeed(session);
+  }
+
+  /** The session's CLI process is gone for good: whatever it was running did
+   *  not survive (R1.9), and the publisher must not outlive the session object
+   *  — a clear-context restart or a provider switch replaces that object under
+   *  the SAME id, and a stale timer would overwrite the new feed's level. The
+   *  query recreate is the one exit that keeps the feed, and does not come
+   *  through here. */
+  private retireTaskFeed(session: Session): void {
+    const publisher = session.taskFeedPublisher;
+    if (!publisher) return;
+    publisher.notify(session.taskFeed!.onProcessRestart());
+    publisher.dispose({ flush: true });
+  }
+
+  /** One session's task feed and its publisher (story 012). The send goes
+   *  straight to the client rather than through a consumer's `sendUpdate`:
+   *  the publisher outlives consumers (a query recreate replaces them), and a
+   *  `session_info_update` is never subject to that chokepoint's filters. */
+  private createTaskFeed(sessionId: string): {
+    taskFeed: TaskFeed;
+    taskFeedPublisher: TaskFeedPublisher;
+  } {
+    const taskFeed = new TaskFeed(
+      () => Date.now(),
+      // Degraded but self-recovered: the Logger has no warn level, so the
+      // line carries it as a field rather than being raised to error.
+      { warn: (message) => this.logger.log(`${message} level=warn`) },
+      sessionId,
+    );
+    const taskFeedPublisher = new TaskFeedPublisher(
+      taskFeed,
+      (snapshot) =>
+        this.client.sessionUpdate({
+          sessionId,
+          update: { sessionUpdate: "session_info_update", _meta: { [TASKS_META_KEY]: snapshot } },
+        }),
+      undefined,
+      (error) =>
+        this.logger.error(
+          `[tasks/feed] sessionId=${logValue(sessionId)} outcome=send_failed reason=${logValue(
+            errorMessage(error),
+          )}`,
+        ),
+    );
+    return { taskFeed, taskFeedPublisher };
   }
 
   /** Cleanly tear down a session: cancel in-flight work, release stream
@@ -6201,6 +6278,9 @@ export class ClaudeAcpAgent {
     // here the client has asked us to close the session, so signalling abort is
     // appropriate; query.close() above has already torn the subprocess down.
     session.abortController.abort();
+    // A pending throttle, retry or reconcile timer must not send to a closed
+    // session.
+    session.taskFeedPublisher?.dispose();
     delete this.sessions[sessionId];
   }
 
@@ -7579,6 +7659,10 @@ export class ClaudeAcpAgent {
       // after the swap above is complete.
       oldInput.end();
       oldQuery.close();
+      // Whatever the old process was running did not survive it (R1.9). The
+      // feed and publisher are the session's, so the endings go out through
+      // the same throttle the replacement query keeps using.
+      session.taskFeedPublisher?.notify(session.taskFeed!.onProcessRestart());
     } catch (error) {
       // Keep the OLD query fully usable and the pending flag set (the next
       // prompt retries); the current turn proceeds with the previous thinking
@@ -8483,6 +8567,7 @@ export class ClaudeAcpAgent {
       toolUseCache: {},
       emittedToolCalls: new Set(),
       liveBackgroundTasks: new Map(),
+      ...this.createTaskFeed(sessionId),
       emittedAssistantText: false,
       owedTrailingIdles: 0,
       messageIdToUuid: new Map(),
