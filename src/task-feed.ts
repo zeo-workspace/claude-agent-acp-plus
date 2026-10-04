@@ -110,11 +110,21 @@ export function normaliseStatus(
   }
 }
 
+/** The SDK types usage as `number`; Zeo parses it as an unsigned integer and
+ *  rejects the whole snapshot on one fractional or negative value. */
+function wholeNumber(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+
 function usageOf(
   usage: { total_tokens: number; tool_uses: number; duration_ms: number } | undefined,
 ): TaskUsage | null {
   if (!usage) return null;
-  return { tokens: usage.total_tokens, toolUses: usage.tool_uses, durationMs: usage.duration_ms };
+  return {
+    tokens: wholeNumber(usage.total_tokens),
+    toolUses: wholeNumber(usage.tool_uses),
+    durationMs: wholeNumber(usage.duration_ms),
+  };
 }
 
 export class TaskFeed {
