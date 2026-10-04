@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.3](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.23.2...v0.23.3) (2026-10-04)
+
+
+### Bug Fixes
+
+* **replay:** stop replaying other agents' messages and task notifications as prompts ([46f1b16](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/46f1b16194c39d0f154d07c30b4c3052c1ea866c))
+
 ## [0.23.2](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.23.1...v0.23.2) (2026-10-03)
 
 
