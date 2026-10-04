@@ -394,6 +394,22 @@ function parseSteerRequest(params: unknown): SteerRequest {
   };
 }
 
+/** Stop one of the agent's tasks (story 012, R2.1). Params
+ *  {@link TasksStopRequest}, result `{}`. */
+export const TASKS_STOP_METHOD = "_claude/tasks/stop";
+/** Move a foreground tool call's task to the background (story 012, R2.3).
+ *  Params {@link TasksBackgroundRequest}, result {@link TasksBackgroundResponse}. */
+export const TASKS_BACKGROUND_METHOD = "_claude/tasks/background";
+/** `agentCapabilities._meta` key advertising the task feed and its two
+ *  methods (R2.7). Zeo gates on this, never on the agent's name — the name is
+ *  `package.json`'s, and differs between this fork and the published mirror. */
+export const TASKS_CAPABILITY_KEY = TASKS_META_KEY;
+export const TASKS_CAPABILITY_VERSION = 1;
+
+export type TasksStopRequest = { sessionId: string; taskId: string };
+export type TasksBackgroundRequest = { sessionId: string; toolCallId: string };
+export type TasksBackgroundResponse = { backgrounded: boolean };
+
 /** The SDK's own text for a rejected control request, passed through to the
  *  client as the internal error's message (R2.4). */
 function errorMessage(error: unknown): string {
@@ -404,6 +420,31 @@ function errorMessage(error: unknown): string {
  *  could otherwise carry a space, a newline or an `=` that forges a field. */
 function logValue(value: string): string {
   return value.replace(/[\s=]+/g, "_");
+}
+
+function requireIdField(params: unknown, method: string, field: string): string {
+  const value =
+    params && typeof params === "object" ? (params as Record<string, unknown>)[field] : undefined;
+  if (typeof value !== "string" || value.length === 0) {
+    throw RequestError.invalidParams(undefined, `${method} params require a non-empty ${field}`);
+  }
+  return value;
+}
+
+/** Validate raw JSON-RPC params into a {@link TasksStopRequest}. */
+export function parseTasksStopRequest(params: unknown): TasksStopRequest {
+  return {
+    sessionId: requireIdField(params, TASKS_STOP_METHOD, "sessionId"),
+    taskId: requireIdField(params, TASKS_STOP_METHOD, "taskId"),
+  };
+}
+
+/** Validate raw JSON-RPC params into a {@link TasksBackgroundRequest}. */
+export function parseTasksBackgroundRequest(params: unknown): TasksBackgroundRequest {
+  return {
+    sessionId: requireIdField(params, TASKS_BACKGROUND_METHOD, "sessionId"),
+    toolCallId: requireIdField(params, TASKS_BACKGROUND_METHOD, "toolCallId"),
+  };
 }
 
 /** Internal model-selection state. Mirrors the shape the ACP SDK exposed as
@@ -585,6 +626,17 @@ type Turn = {
  *  loop to show anything a 15-second one would miss. */
 const QUOTA_POLL_DEFAULT_MS = 60_000;
 const QUOTA_POLL_FLOOR_MS = 15_000;
+
+/** Whether sessions ask the SDK for progress summaries on subagent tasks
+ *  (`CLAUDE_ACP_PROGRESS_SUMMARIES`). Only `1` or `true` turn it on; anything
+ *  else — unset included — leaves it off, because each summary is a model
+ *  call the user pays for. */
+export function progressSummariesEnabled(
+  raw: string | undefined = process.env.CLAUDE_ACP_PROGRESS_SUMMARIES,
+): boolean {
+  const value = raw?.trim().toLowerCase();
+  return value === "1" || value === "true";
+}
 
 /** Resolve the poll interval from the environment, clamped. An unparseable or
  *  negative value falls back to the default rather than disabling the refresh:
@@ -1974,6 +2026,7 @@ export class ClaudeAcpAgent {
           claudeCode: {
             promptQueueing: true,
           },
+          [TASKS_CAPABILITY_KEY]: { version: TASKS_CAPABILITY_VERSION },
         },
         promptCapabilities: {
           image: true,
@@ -2695,6 +2748,77 @@ export class ClaudeAcpAgent {
    *  stays Host-owned so the Host can submit it through a standard
    *  `session/prompt`. Without the opt-in, the existing detached `prompt()` and
    *  `startedNewTurn` result are preserved for compatibility. */
+  /** `_claude/tasks/stop`: stop a task the feed holds as running (R2.1, R2.2). */
+  async stopTask(params: TasksStopRequest): Promise<Record<string, never>> {
+    const { sessionId, taskId } = params;
+    return this.taskAction(
+      TASKS_STOP_METHOD,
+      sessionId,
+      `taskId=${logValue(taskId)}`,
+      async (session) => {
+        if (!session.taskFeed?.isRunning(taskId)) {
+          throw RequestError.invalidParams(undefined, `task ${taskId} is not running`);
+        }
+        try {
+          await session.query.stopTask(taskId);
+        } catch (error) {
+          throw RequestError.internalError(undefined, errorMessage(error));
+        }
+        return {};
+      },
+    );
+  }
+
+  /** `_claude/tasks/background`: background the task a foreground tool call
+   *  started (R2.3, R2.4). `false` means the id matched no foreground task. */
+  async backgroundTask(params: TasksBackgroundRequest): Promise<TasksBackgroundResponse> {
+    const { sessionId, toolCallId } = params;
+    return this.taskAction(
+      TASKS_BACKGROUND_METHOD,
+      sessionId,
+      `toolCallId=${logValue(toolCallId)}`,
+      async (session) => {
+        try {
+          return { backgrounded: await session.query.backgroundTasks(toolCallId) };
+        } catch (error) {
+          // Thrown when background tasks are disabled for the session.
+          throw RequestError.internalError(undefined, errorMessage(error));
+        }
+      },
+    );
+  }
+
+  /** Resolve the session, run the action, and write its one `[tasks/action]`
+   *  line (R2.6). The line carries ids and the outcome only — never a command
+   *  line, a description or a summary. */
+  private async taskAction<T>(
+    method: string,
+    sessionId: string,
+    target: string,
+    action: (session: Session) => Promise<T>,
+  ): Promise<T> {
+    const log = (outcome: string, reason?: string) =>
+      this.logger.log(
+        `[tasks/action] method=${method} sessionId=${logValue(sessionId)} ${target} outcome=${outcome}` +
+          (reason ? ` reason=${logValue(reason)}` : ""),
+      );
+    try {
+      const session = this.sessions[sessionId];
+      if (!session) {
+        throw RequestError.invalidParams(undefined, `unknown session ${sessionId}`);
+      }
+      if (session.queryClosed) {
+        throw RequestError.internalError(undefined, SESSION_ENDED_MESSAGE);
+      }
+      const result = await action(session);
+      log("ok");
+      return result;
+    } catch (error) {
+      log("error", error instanceof RequestError ? `code_${error.code}` : "unexpected");
+      throw error;
+    }
+  }
+
   async steer(params: SteerRequest): Promise<SteerResponse> {
     const sessionId = params.sessionId;
     const session = this.sessions[sessionId];
@@ -8131,6 +8255,10 @@ export class ClaudeAcpAgent {
       // (story 006, R3.3). Placed before the user spread so an explicit user
       // `enableFileCheckpointing` still wins.
       enableFileCheckpointing: true,
+      // Model-written one-line summaries on a subagent's `task_progress`
+      // (story 012, R3), opt-in because each costs tokens. Before the user
+      // spread, so an explicit `agentProgressSummaries` still wins.
+      agentProgressSummaries: progressSummariesEnabled(),
       ...userProvidedOptions,
       ...(settings && { settings }),
       env,
@@ -10813,6 +10941,16 @@ export function runAcp(logger?: Logger) {
     .onNotification(methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params))
     .onRequest<SteerRequest, SteerResponse>(STEER_METHOD, { parse: parseSteerRequest }, (ctx) =>
       agent.steer(ctx.params),
+    )
+    .onRequest<TasksStopRequest, Record<string, never>>(
+      TASKS_STOP_METHOD,
+      { parse: parseTasksStopRequest },
+      (ctx) => agent.stopTask(ctx.params),
+    )
+    .onRequest<TasksBackgroundRequest, TasksBackgroundResponse>(
+      TASKS_BACKGROUND_METHOD,
+      { parse: parseTasksBackgroundRequest },
+      (ctx) => agent.backgroundTask(ctx.params),
     )
     .onRequest<GoalRequest, GoalControlResponse>(
       GOAL_CONTROL_METHOD,
