@@ -1,0 +1,50 @@
+{
+  "tasks": [
+    {
+      "id": "b7k2m9x1q",
+      "toolCallId": "toolu_01ShellSleep20",
+      "type": "shell",
+      "description": "Run sleep 20 in the background",
+      "background": true,
+      "depth": 0,
+      "status": "running",
+      "startedAt": 1759500000000,
+      "endedAt": null,
+      "usage": null,
+      "lastTool": null,
+      "summary": null
+    },
+    {
+      "id": "a3f8c2d4e5b6",
+      "toolCallId": "toolu_01ExploreFeed",
+      "type": "subagent",
+      "description": "Explore the task feed",
+      "background": false,
+      "depth": 1,
+      "status": "running",
+      "startedAt": 1759500001000,
+      "endedAt": null,
+      "usage": {
+        "tokens": 18234,
+        "toolUses": 7,
+        "durationMs": 42000
+      },
+      "lastTool": "Grep",
+      "summary": "Reading the SDK task message types"
+    },
+    {
+      "id": "c9d1e2f3g",
+      "toolCallId": "toolu_01RunLinter",
+      "type": "shell",
+      "description": "Run the linter",
+      "background": true,
+      "depth": 0,
+      "status": "completed",
+      "startedAt": 1759500002000,
+      "endedAt": 1759500005000,
+      "usage": null,
+      "lastTool": null,
+      "summary": "Background command \"Run the linter\" completed (exit code 0)"
+    }
+  ]
+}
