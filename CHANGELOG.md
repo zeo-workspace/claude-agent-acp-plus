@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.6](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.23.5...v0.23.6) (2026-10-04)
+
+
+### Documentation
+
+* refresh the package description and README to the current feature set ([9a445ed](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/9a445edacb819638370530b45d5429778bead1ec))
+
 ## [0.23.5](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.23.4...v0.23.5) (2026-10-04)
 
 
