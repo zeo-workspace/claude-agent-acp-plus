@@ -16413,3 +16413,76 @@ describe("permission_denied", () => {
     expect((sent[0]._meta as any).claudeCode).not.toHaveProperty("parentToolUseId");
   });
 });
+
+describe("force-cancel while the consumer is sending an update (upstream #1243)", () => {
+  it("ends a cancelled turn when the backstop fires during a slow sessionUpdate", async () => {
+    // Claude Code streams an answer and then wedges. The client takes the
+    // chunk slowly; the user cancels, and the force-cancel backstop fires while
+    // the consumer is still inside that sessionUpdate. The abort listener the
+    // next loop iteration adds is attached to an already-aborted signal and
+    // never fires -- so before the fix the turn never ended.
+    let releaseClient!: () => void;
+    const clientGate = new Promise<void>((resolve) => (releaseClient = resolve));
+    let clientBusy = false;
+    const agent = new ClaudeAcpAgent(
+      {
+        sessionUpdate: async (n: SessionNotification) => {
+          if (n.update.sessionUpdate === "agent_message_chunk" && !clientBusy) {
+            clientBusy = true;
+            await clientGate;
+          }
+        },
+      } as unknown as AcpClient,
+      { log: () => {}, error: () => {} },
+    );
+    agent.forceCancelGraceMs = 10;
+
+    injectGeneratorSession(agent, (input) => {
+      async function* messageGenerator() {
+        const iter = input[Symbol.asyncIterator]();
+        const u1 = await iter.next();
+        yield lifecycleInit;
+        yield userEcho(u1.value);
+        yield lifecycleFrame(u1.value.uuid, "started");
+        yield {
+          type: "assistant",
+          parent_tool_use_id: null,
+          uuid: randomUUID(),
+          session_id: "test-session",
+          message: {
+            role: "assistant",
+            model: "claude-sonnet-4-5",
+            stop_reason: null,
+            usage: {
+              input_tokens: 1,
+              output_tokens: 1,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+            content: [{ type: "text", text: "partial answer" }],
+          },
+        };
+        await new Promise<never>(() => {}); // wedged: nothing more ever arrives
+      }
+      return messageGenerator();
+    });
+
+    const prompt = agent.prompt({
+      sessionId: "test-session",
+      prompt: [{ type: "text", text: "go" }],
+    });
+    const deadline = Date.now() + 2000;
+    while (!clientBusy && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+    expect(clientBusy).toBe(true);
+
+    await agent.cancel({ sessionId: "test-session" });
+    await new Promise((r) => setTimeout(r, 50)); // the backstop fires mid-update
+    releaseClient();
+
+    const outcome = await Promise.race([
+      prompt.then((r) => r.stopReason),
+      new Promise<string>((r) => setTimeout(() => r("never ended"), 2000)),
+    ]);
+    expect(outcome).toBe("cancelled");
+  });
+});
