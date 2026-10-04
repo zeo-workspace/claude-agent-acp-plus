@@ -174,3 +174,23 @@ describe("TaskFeedPublisher — sends", () => {
     expect(sent).toEqual([["x:running"], ["x:interrupted"]]);
   });
 });
+
+describe("TaskFeed — usage numbers", () => {
+  it("publishes usage as whole, non-negative numbers", () => {
+    const feed = new TaskFeed(() => 1);
+    feed.onStarted(started("a"));
+    feed.onProgress({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "a",
+      description: "a",
+      usage: { total_tokens: 10.6, tool_uses: -1, duration_ms: Number.NaN },
+    } as any);
+
+    expect(feed.snapshot().snapshot.tasks[0].usage).toEqual({
+      tokens: 11,
+      toolUses: 0,
+      durationMs: 0,
+    });
+  });
+});
