@@ -62,9 +62,7 @@ async function sessionWithTasks(agent: ClaudeAcpAgent) {
   const query = lastScriptedQuery();
   const response = agent.prompt({ sessionId, prompt: [{ type: "text", text: "go" }] });
   query.out.push(running(sessionId));
-  query.out.push(
-    taskStarted(sessionId, "b1", { description: DESCRIPTION, prompt: COMMAND_LINE }),
-  );
+  query.out.push(taskStarted(sessionId, "b1", { description: DESCRIPTION, prompt: COMMAND_LINE }));
   query.out.push(
     taskStarted(sessionId, "f1", {
       task_type: "local_agent",
@@ -103,7 +101,9 @@ describe("_claude/tasks/stop — outcomes (R2.1, R2.2)", () => {
     const { agent } = newAgent();
     await sessionWithTasks(agent);
 
-    const error = await agent.stopTask({ sessionId: "no-such-session", taskId: "b1" }).catch((e) => e);
+    const error = await agent
+      .stopTask({ sessionId: "no-such-session", taskId: "b1" })
+      .catch((e) => e);
     expect(error?.code).toBe(-32602);
     expect(errorText(error)).toContain("no-such-session");
   });
@@ -206,7 +206,10 @@ describe("task actions — one structured log line each (R2.6, Q13)", () => {
 
     const logged = actionLines(lines).slice(before);
     expect(logged).toHaveLength(1);
-    const tokens = logged[0].slice(logged[0].indexOf("[tasks/action]") + "[tasks/action]".length).trim().split(/\s+/);
+    const tokens = logged[0]
+      .slice(logged[0].indexOf("[tasks/action]") + "[tasks/action]".length)
+      .trim()
+      .split(/\s+/);
     for (const token of tokens) expect(token).toMatch(/^\w+=\S*$/);
     expect(fields(logged[0])).toMatchObject({
       method: STOP,
@@ -294,7 +297,7 @@ function wire(): Wire {
 }
 
 describe("task feed capability (R2.7)", () => {
-  it("initialize advertises agentCapabilities._meta[\"_claude/tasks\"] = { version: 1 }", async () => {
+  it('initialize advertises agentCapabilities._meta["_claude/tasks"] = { version: 1 }', async () => {
     const { agent } = newAgent();
     const response = await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
 
@@ -335,11 +338,7 @@ describe("task actions over JSON-RPC (R2.1, R2.2, R2.5)", () => {
     const w = wire();
     const { sessionId, query } = await sessionWithTasks(w.agent);
 
-    for (const params of [
-      { sessionId, taskId: "" },
-      { sessionId },
-      { taskId: "b1" },
-    ]) {
+    for (const params of [{ sessionId, taskId: "" }, { sessionId }, { taskId: "b1" }]) {
       const error = await w.request(STOP, params).catch((e) => e);
       expect(error?.code).toBe(-32602);
     }
@@ -355,7 +354,9 @@ describe("task actions over JSON-RPC (R2.1, R2.2, R2.5)", () => {
     const w = wire();
     await sessionWithTasks(w.agent);
 
-    const error = await w.request(STOP, { sessionId: "no-such-session", taskId: "b1" }).catch((e) => e);
+    const error = await w
+      .request(STOP, { sessionId: "no-such-session", taskId: "b1" })
+      .catch((e) => e);
     expect(error?.code).toBe(-32602);
     expect(errorText(error)).toContain("no-such-session");
   });

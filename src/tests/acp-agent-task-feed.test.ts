@@ -121,7 +121,9 @@ describe("task feed wiring — a background shell's life (R1.1, R1.4, R1.6)", ()
       () => s.tasksSnapshots().some((snap) => find(snap, "b1")?.status === "completed"),
       "the completed snapshot",
     );
-    const ending = s.published.find((p) => find(p.meta[TASKS_META_KEY], "b1")?.status === "completed")!;
+    const ending = s.published.find(
+      (p) => find(p.meta[TASKS_META_KEY], "b1")?.status === "completed",
+    )!;
     expect(ending.at - sentAt).toBeLessThan(1_000);
     expect(find(ending.meta[TASKS_META_KEY], "b1")).toMatchObject({
       status: "completed",
@@ -173,7 +175,10 @@ describe("task feed wiring — a background shell's life (R1.1, R1.4, R1.6)", ()
 describe("task feed wiring — the old key is untouched (R1.10)", () => {
   it("keeps publishing _claude/backgroundTasks with its current shape and timing", async () => {
     const s = await startSession();
-    await s.turn(taskStarted(s.sessionId, "b1"), backgroundTasksChanged(s.sessionId, [{ task_id: "b1" }]));
+    await s.turn(
+      taskStarted(s.sessionId, "b1"),
+      backgroundTasksChanged(s.sessionId, [{ task_id: "b1" }]),
+    );
     s.query.out.push(taskNotification(s.sessionId, "b1"));
     s.query.out.push(backgroundTasksChanged(s.sessionId, []));
     await waitFor(() => s.backgroundLevels().length === 2, "two background levels");
@@ -214,14 +219,21 @@ describe("task feed wiring — process restart (R1.9)", () => {
     const afterRestart = s.tasksSnapshots().length;
     const replacement = lastScriptedQuery();
     expect(replacement).not.toBe(s.query);
-    const response = s.agent.prompt({ sessionId: s.sessionId, prompt: [{ type: "text", text: "again" }] });
+    const response = s.agent.prompt({
+      sessionId: s.sessionId,
+      prompt: [{ type: "text", text: "again" }],
+    });
     replacement.out.push(running(s.sessionId));
     replacement.out.push(taskStarted(s.sessionId, "b3"));
     replacement.out.push(result(s.sessionId));
     replacement.out.push(idle(s.sessionId));
     await response;
     await waitFor(
-      () => s.tasksSnapshots().slice(afterRestart).some((snap: any) => find(snap, "b3")),
+      () =>
+        s
+          .tasksSnapshots()
+          .slice(afterRestart)
+          .some((snap: any) => find(snap, "b3")),
       "a snapshot from the replacement query",
     );
     for (const snapshot of s.tasksSnapshots().slice(afterRestart)) {
@@ -249,8 +261,12 @@ describe("task feed wiring — failures and teardown", () => {
     const s = await startSession();
     await s.turn(taskStarted(s.sessionId, "a1", { task_type: "local_agent" }));
     await waitFor(() => s.tasksSnapshots().length > 0, "the running snapshot");
-    s.query.out.push(taskProgress(s.sessionId, "a1", { usage: { total_tokens: 1, tool_uses: 1, duration_ms: 1 } }));
-    s.query.out.push(taskProgress(s.sessionId, "a1", { usage: { total_tokens: 2, tool_uses: 1, duration_ms: 2 } }));
+    s.query.out.push(
+      taskProgress(s.sessionId, "a1", { usage: { total_tokens: 1, tool_uses: 1, duration_ms: 1 } }),
+    );
+    s.query.out.push(
+      taskProgress(s.sessionId, "a1", { usage: { total_tokens: 2, tool_uses: 1, duration_ms: 2 } }),
+    );
     await new Promise((r) => setTimeout(r, 50));
 
     await s.agent.closeSession({ sessionId: s.sessionId });

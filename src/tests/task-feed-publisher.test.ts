@@ -220,9 +220,7 @@ describe("TaskFeedPublisher — endings bypass the throttle (R1.4)", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(s.sent.length).toBe(before + 1);
-    expect(s.sent.at(-1)!.snapshot.tasks.find((t: any) => t.id === "a1").status).toBe(
-      "completed",
-    );
+    expect(s.sent.at(-1)!.snapshot.tasks.find((t: any) => t.id === "a1").status).toBe("completed");
   });
 
   it("cancels the pending trailing publish when an ending goes out", async () => {
@@ -336,9 +334,9 @@ describe("TaskFeedPublisher — level reconciliation timer", () => {
 
     s.level([]); // b1 missing from the level: deadline in 2 s
     await vi.advanceTimersByTimeAsync(1_900);
-    expect(
-      s.sent.some((x) => x.snapshot.tasks.some((t: any) => t.status === "interrupted")),
-    ).toBe(false);
+    expect(s.sent.some((x) => x.snapshot.tasks.some((t: any) => t.status === "interrupted"))).toBe(
+      false,
+    );
 
     await vi.advanceTimersByTimeAsync(1_000);
     const last = s.sent.at(-1)!;
@@ -355,9 +353,9 @@ describe("TaskFeedPublisher — level reconciliation timer", () => {
     s.end("b1");
     await vi.advanceTimersByTimeAsync(5_000);
 
-    expect(
-      s.sent.some((x) => x.snapshot.tasks.some((t: any) => t.status === "interrupted")),
-    ).toBe(false);
+    expect(s.sent.some((x) => x.snapshot.tasks.some((t: any) => t.status === "interrupted"))).toBe(
+      false,
+    );
   });
 
   it("does not fire the reconcile timer after dispose", async () => {
