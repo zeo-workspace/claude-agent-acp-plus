@@ -22,7 +22,12 @@ vi.mock("@anthropic-ai/claude-agent-sdk", async () => {
       return makeMockQuery({
         initializationResult: async () => ({
           models: [
-            { value: "claude-sonnet-4-6", displayName: "Sonnet", description: "d", supportsAutoMode: true },
+            {
+              value: "claude-sonnet-4-6",
+              displayName: "Sonnet",
+              description: "d",
+              supportsAutoMode: true,
+            },
           ],
         }),
       });
@@ -59,7 +64,11 @@ describe("progress summaries opt-in", () => {
     } else {
       vi.stubEnv("CLAUDE_ACP_PROGRESS_SUMMARIES", env);
     }
-    await agent.newSession({ cwd: process.cwd(), mcpServers: [], ...(meta ? { _meta: meta } : {}) });
+    await agent.newSession({
+      cwd: process.cwd(),
+      mcpServers: [],
+      ...(meta ? { _meta: meta } : {}),
+    });
     return capturedOptions!;
   }
 
@@ -67,11 +76,11 @@ describe("progress summaries opt-in", () => {
     expect((await optionsWith(undefined)).agentProgressSummaries).toBeFalsy();
   });
 
-  it("starts sessions with progress summaries on for \"1\" (R3.2)", async () => {
+  it('starts sessions with progress summaries on for "1" (R3.2)', async () => {
     expect((await optionsWith("1")).agentProgressSummaries).toBe(true);
   });
 
-  it("starts sessions with progress summaries on for \"true\" (R3.2)", async () => {
+  it('starts sessions with progress summaries on for "true" (R3.2)', async () => {
     expect((await optionsWith("true")).agentProgressSummaries).toBe(true);
   });
 
