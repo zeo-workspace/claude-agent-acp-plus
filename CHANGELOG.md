@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.23.4](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.23.3...v0.23.4) (2026-10-04)
+
+
+### Bug Fixes
+
+* **cancel:** end a cancelled turn when the force-cancel fires during an update ([47dd074](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/47dd074e6254c9d339682a1ba971157eb5deb906))
+* **close:** answer session/close without waiting for the interrupt reply ([b40b98d](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/b40b98d97464fcd330efb29af9592170a5de5ec7))
+
 ## [0.23.3](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.23.2...v0.23.3) (2026-10-04)
 
 
