@@ -1385,6 +1385,14 @@ export type ToolUseCache = {
   };
 };
 
+/** A cached tool call's `description` input, when it is a string. */
+function toolDescriptionOf(cache: ToolUseCache, toolUseId: unknown): string | undefined {
+  if (typeof toolUseId !== "string") return undefined;
+  const input = cache[toolUseId]?.input;
+  if (typeof input !== "object" || input === null || !("description" in input)) return undefined;
+  return typeof input.description === "string" ? input.description : undefined;
+}
+
 type StreamedToolInput = {
   id: string;
   name: string;
@@ -4474,7 +4482,16 @@ export class ClaudeAcpAgent {
                 if (message.subagent_type && session.activeTurn && !session.activeTurn.settled) {
                   (session.activeTurn.spawnedTaskIds ??= new Set()).add(message.task_id);
                 }
-                session.taskFeedPublisher?.notify(session.taskFeed!.onStarted(message));
+                // The spawning tool call's own `description` labels a shell
+                // task instead of its command line. Read it now: the cache
+                // entry is pruned at `tool_result`, which for a background
+                // Bash arrives almost at once.
+                session.taskFeedPublisher?.notify(
+                  session.taskFeed!.onStarted(
+                    message,
+                    toolDescriptionOf(session.toolUseCache, message.tool_use_id),
+                  ),
+                );
                 break;
               case "task_notification":
                 // The task settled — no further tool calls can originate
