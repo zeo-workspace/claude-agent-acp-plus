@@ -19,6 +19,12 @@
  * progress, at once on an ending, and once more after a burst so the latest
  * values are not lost.
  *
+ * A foreground shell task (`local_bash`, not backgrounded) is held back for
+ * `FOREGROUND_SHELL_HOLD_MS`: Claude Code registers every shell command as a
+ * task, so only one still running after the hold, or moved to the background,
+ * is published. One that ends while held is dropped without a trace. The feed
+ * stays clock-driven: the publisher's timer calls `promoteDue()`.
+ *
  * Neither class ever copies a command line (`SDKTaskStartedMessage.prompt`)
  * into an entry or a log line.
  */
@@ -56,7 +62,10 @@ export type TaskEntry = {
 export type TasksSnapshot = { tasks: TaskEntry[] };
 
 /** What a message did to the table; the publisher decides timing from it. */
-export type TaskChange = "none" | "progress" | "terminal";
+export type TaskChange = "none" | "progress" | "terminal" | "held";
+
+/** How long a foreground shell task is held back before it is published. */
+export const FOREGROUND_SHELL_HOLD_MS = 5000;
 
 /** How long a running background task may be missing from the level before
  *  it is ended as `interrupted`. The level and the bookends race (the level
@@ -139,6 +148,10 @@ export class TaskFeed {
   private readonly snapshotLives = new Map<string, number>();
   /** task id → time after which a missing bookend means `interrupted`. */
   private readonly deadlines = new Map<string, number>();
+  /** Foreground shell tasks not published yet: see `promoteDue`. */
+  private readonly held = new Map<string, TaskEntry>();
+  /** Shell task ids labelled by their tool call: a patch never relabels them. */
+  private readonly toolDescribed = new Set<string>();
 
   constructor(
     private readonly clock: () => number,
@@ -146,23 +159,28 @@ export class TaskFeed {
     private readonly sessionId = "",
   ) {}
 
-  onStarted(msg: SDKTaskStartedMessage): TaskChange {
+  /**
+   * `toolDescription` is the spawning tool call's own `description` input. A
+   * shell task carries it when it is non-empty; otherwise the SDK's, which
+   * for a shell is the command text. Other task types keep the SDK's.
+   */
+  onStarted(msg: SDKTaskStartedMessage, toolDescription?: string): TaskChange {
     if (msg.ambient) {
       this.ambient.add(msg.task_id);
       return "none";
     }
-    if (this.tasks.get(msg.task_id)?.status === "running") return "none";
-    // A known id starting again is a new life of the same task — a resumed
-    // subagent is re-registered under its agent id. It replaces the ended
-    // entry, published or not: the running state supersedes an ending the
-    // client has not seen yet, and a published id must be shown again.
-    this.published.delete(msg.task_id);
-    this.lives.set(msg.task_id, (this.lives.get(msg.task_id) ?? 0) + 1);
-    this.tasks.set(msg.task_id, {
+    if (this.tasks.get(msg.task_id)?.status === "running" || this.held.has(msg.task_id)) {
+      return "none";
+    }
+    const shell = msg.task_type === "local_bash";
+    const fromTool = shell && typeof toolDescription === "string" && toolDescription.trim() !== "";
+    if (fromTool) this.toolDescribed.add(msg.task_id);
+    else this.toolDescribed.delete(msg.task_id);
+    const entry: TaskEntry = {
       id: msg.task_id,
       toolCallId: msg.tool_use_id ?? null,
       type: normaliseType(msg.task_type),
-      description: msg.description,
+      description: fromTool ? toolDescription : msg.description,
       background: msg.is_backgrounded ?? false,
       depth: msg.spawn_depth ?? 0,
       status: "running",
@@ -171,25 +189,69 @@ export class TaskFeed {
       usage: null,
       lastTool: null,
       summary: null,
-    });
+    };
+    if (shell && msg.is_backgrounded !== true) {
+      this.held.set(msg.task_id, entry);
+      return "held";
+    }
+    this.admit(entry);
     return "progress";
   }
 
+  /** Publishes every held shell task whose hold has run out. */
+  promoteDue(): TaskChange {
+    const now = this.clock();
+    let change: TaskChange = "none";
+    for (const [id, entry] of this.held) {
+      if (entry.startedAt + FOREGROUND_SHELL_HOLD_MS > now) continue;
+      this.held.delete(id);
+      this.admit(entry);
+      change = "progress";
+    }
+    return change;
+  }
+
+  /** When the earliest held shell task is due for promotion; null if none is held. */
+  nextHoldDue(): number | null {
+    let next: number | null = null;
+    for (const entry of this.held.values()) {
+      const due = entry.startedAt + FOREGROUND_SHELL_HOLD_MS;
+      if (next === null || due < next) next = due;
+    }
+    return next;
+  }
+
   onProgress(msg: SDKTaskProgressMessage): TaskChange {
-    const task = this.running(msg.task_id, "task_progress");
+    const heldEntry = this.held.get(msg.task_id);
+    const task = heldEntry ?? this.running(msg.task_id, "task_progress");
     if (!task) return "none";
     task.usage = usageOf(msg.usage);
     task.lastTool = msg.last_tool_name ?? task.lastTool;
     task.summary = msg.summary ?? task.summary;
-    return "progress";
+    // Kept for the promotion, but nobody has been shown the task yet.
+    return heldEntry ? "none" : "progress";
   }
 
   onUpdated(msg: SDKTaskUpdatedMessage): TaskChange {
+    const heldEntry = this.held.get(msg.task_id);
+    if (heldEntry) {
+      if (msg.patch.is_backgrounded === true) {
+        // Moved to the background: published at once, then patched as usual.
+        this.held.delete(msg.task_id);
+        this.admit(heldEntry);
+      } else {
+        if (normaliseStatus(msg.patch.status)) {
+          this.held.delete(msg.task_id);
+        } else {
+          this.patch(heldEntry, msg.patch);
+        }
+        return "none";
+      }
+    }
     const task = this.running(msg.task_id, "task_updated");
     if (!task) return "none";
     const ending = normaliseStatus(msg.patch.status);
-    if (msg.patch.description !== undefined) task.description = msg.patch.description;
-    if (msg.patch.is_backgrounded !== undefined) task.background = msg.patch.is_backgrounded;
+    this.patch(task, msg.patch);
     if (ending) {
       this.end(task, ending);
       return "terminal";
@@ -198,6 +260,8 @@ export class TaskFeed {
   }
 
   onNotification(msg: SDKTaskNotificationMessage): TaskChange {
+    // A held shell task that ends was never shown: its ending is not news.
+    if (this.held.delete(msg.task_id)) return "none";
     const task = this.running(msg.task_id, "task_notification");
     if (!task) return "none";
     const ending = normaliseStatus(msg.status, msg.reason) ?? "completed";
@@ -249,8 +313,10 @@ export class TaskFeed {
     return change;
   }
 
-  /** The CLI process restarted: whatever was running did not survive it. */
+  /** The CLI process restarted: whatever was running did not survive it. A
+   *  held shell task was never shown, so it is dropped rather than ended. */
   onProcessRestart(): TaskChange {
+    this.held.clear();
     let change: TaskChange = "none";
     for (const task of this.tasks.values()) {
       if (task.status !== "running") continue;
@@ -300,6 +366,26 @@ export class TaskFeed {
     return undefined;
   }
 
+  /** Puts a running entry into the table. A known id starting again is a new
+   *  life of the same task — a resumed subagent is re-registered under its
+   *  agent id. It replaces the ended entry, published or not: the running
+   *  state supersedes an ending the client has not seen yet, and a published
+   *  id must be shown again. */
+  private admit(entry: TaskEntry): void {
+    this.published.delete(entry.id);
+    this.lives.set(entry.id, (this.lives.get(entry.id) ?? 0) + 1);
+    this.tasks.set(entry.id, entry);
+  }
+
+  /** Applies a `task_updated` patch's label and placement; a label taken from
+   *  the tool call is never replaced. */
+  private patch(task: TaskEntry, patch: SDKTaskUpdatedMessage["patch"]): void {
+    if (patch.description !== undefined && !this.toolDescribed.has(task.id)) {
+      task.description = patch.description;
+    }
+    if (patch.is_backgrounded !== undefined) task.background = patch.is_backgrounded;
+  }
+
   private end(task: TaskEntry, status: Exclude<TaskStatus, "running">, at = this.clock()): void {
     task.status = status;
     task.endedAt = at;
@@ -331,6 +417,9 @@ export class TaskFeedPublisher {
   private pending: unknown = null;
   private reconcileTimer: unknown = null;
   private reconcileAt: number | null = null;
+  /** Promotes held foreground shells: armed at the feed's `nextHoldDue()`. */
+  private holdTimer: unknown = null;
+  private holdAt: number | null = null;
   private closed = false;
   /** Set by `dispose({ flush: true })`: a publish queued behind an in-flight
    *  send still goes out once — a retirement's `interrupted` endings. */
@@ -351,6 +440,8 @@ export class TaskFeedPublisher {
       const wait = this.lastSendAt + PUBLISH_INTERVAL_MS - this.timers.now();
       if (wait <= 0) this.publishNow();
       else if (this.pending === null) this.arm(wait);
+    } else if (change === "held") {
+      this.armHold();
     }
     this.armReconcile();
   }
@@ -362,6 +453,9 @@ export class TaskFeedPublisher {
     if (this.reconcileTimer !== null) this.timers.clearTimeout(this.reconcileTimer);
     this.reconcileTimer = null;
     this.reconcileAt = null;
+    if (this.holdTimer !== null) this.timers.clearTimeout(this.holdTimer);
+    this.holdTimer = null;
+    this.holdAt = null;
   }
 
   private publishNow(): void {
@@ -428,6 +522,37 @@ export class TaskFeedPublisher {
   private cancelPending(): void {
     if (this.pending !== null) this.timers.clearTimeout(this.pending);
     this.pending = null;
+  }
+
+  /** One timer for every held shell, at the earliest due time. A held shell
+   *  that ended early leaves the timer armed: it fires, promotes nothing, and
+   *  re-arms for the next one still held. */
+  private armHold(): void {
+    const at = this.feed.nextHoldDue();
+    if (at === null) return;
+    if (this.holdAt !== null && this.holdAt <= at) return;
+    if (this.holdTimer !== null) this.timers.clearTimeout(this.holdTimer);
+    this.holdAt = at;
+    this.holdTimer = this.timers.setTimeout(
+      () => {
+        this.holdTimer = null;
+        this.holdAt = null;
+        if (this.closed) return;
+        // Outside the SDK loop nobody handles an error: a failed send is
+        // caught in `publishNow`, and anything else thrown is reported here.
+        try {
+          this.notify(this.feed.promoteDue());
+        } catch (error) {
+          try {
+            this.onSendError(error);
+          } catch {
+            // Re-arming matters more than the log line.
+          }
+        }
+        if (!this.closed) this.armHold();
+      },
+      Math.max(0, at - this.timers.now()),
+    );
   }
 
   private armReconcile(): void {

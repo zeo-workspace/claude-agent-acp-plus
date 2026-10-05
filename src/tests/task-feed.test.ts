@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
-import { TaskFeed } from "../task-feed.js";
+import { FOREGROUND_SHELL_HOLD_MS, TaskFeed } from "../task-feed.js";
 
 const SESSION = "test-session";
 
@@ -138,11 +138,14 @@ describe("TaskFeed — a started task (R1.1)", () => {
   });
 
   it("carries a foreground subagent's spawn depth, and defaults depth to 0 and toolCallId to null", () => {
-    const { feed } = makeFeed();
+    const { feed, at } = makeFeed();
     feed.onStarted(
       started("a1", { task_type: "local_agent", is_backgrounded: false, spawn_depth: 2 }),
     );
     feed.onStarted(started("b1", { tool_use_id: undefined, is_backgrounded: undefined }));
+    // Story 022: a foreground shell is held back until FOREGROUND_SHELL_HOLD_MS.
+    at(1_000_000 + FOREGROUND_SHELL_HOLD_MS);
+    feed.promoteDue();
 
     const snapshot = publish(feed);
     expect(byId(snapshot, "a1")).toMatchObject({
@@ -461,8 +464,11 @@ describe("TaskFeed — ambient tasks (R1.7)", () => {
 
 describe("TaskFeed — moving a task to the background (R1.8)", () => {
   it("publishes a foreground task with background: true after task_updated is_backgrounded", () => {
-    const { feed } = makeFeed();
+    const { feed, at } = makeFeed();
     feed.onStarted(started("b1", { is_backgrounded: false }));
+    // Story 022: a foreground shell is held back until FOREGROUND_SHELL_HOLD_MS.
+    at(1_000_000 + FOREGROUND_SHELL_HOLD_MS);
+    feed.promoteDue();
     expect(byId(publish(feed), "b1").background).toBe(false);
 
     expect(feed.onUpdated(updated("b1", { is_backgrounded: true }))).not.toBe("none");
