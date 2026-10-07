@@ -15,7 +15,11 @@ export interface ClaudePermissionPresentationInput {
   defaultToNo?: boolean;
 }
 
-function humanText(value: unknown, maxLength: number, singleLine = false): string | undefined {
+export function humanText(
+  value: unknown,
+  maxLength: number,
+  singleLine = false,
+): string | undefined {
   if (typeof value !== "string") return undefined;
   const withoutControls = Array.from(value)
     .filter((character) => {

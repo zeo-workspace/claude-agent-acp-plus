@@ -13,6 +13,8 @@ export const PERMISSION_OPTION_ID = {
   exitPlanClearAuto: "exit-plan-clear-auto",
   exitPlanClearBypass: "exit-plan-clear-bypass",
   exitPlanClearAcceptEdits: "exit-plan-clear-accept-edits",
+  classifierAllowOnce: "classifier-allow-once",
+  classifierAllowSession: "classifier-allow-session",
   reject: "reject",
 } as const;
 
@@ -42,6 +44,23 @@ export function allowWithUpdates(name: string): PermissionOption {
 
 export function reject(name = "No"): PermissionOption {
   return { optionId: PERMISSION_OPTION_ID.reject, name, kind: "reject_once" };
+}
+
+/**
+ * The three answers to an auto-mode classifier denial. Both "Yes" options are
+ * `allow_once`: `allow_always` reads as a persistent choice, and neither answer
+ * ever writes a rule.
+ */
+export function buildClassifierEscalationOptions(): PermissionOption[] {
+  return [
+    { optionId: PERMISSION_OPTION_ID.classifierAllowOnce, name: "Yes", kind: "allow_once" },
+    {
+      optionId: PERMISSION_OPTION_ID.classifierAllowSession,
+      name: "Yes for this session",
+      kind: "allow_once",
+    },
+    reject(),
+  ];
 }
 
 export function withOptionalUpdate(

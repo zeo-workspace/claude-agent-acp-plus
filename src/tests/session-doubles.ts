@@ -8,6 +8,7 @@
 import { vi } from "vitest";
 import { randomUUID } from "crypto";
 import { SessionTitles } from "../session-titles.js";
+import { EscalationRegistry, GrantStore } from "../classifier-escalation.js";
 import { NO_PLAN_RATE_LIMITS } from "./helpers.js";
 
 /** Stand-in agent for a `SessionTitles` whose test doesn't care about titles:
@@ -18,6 +19,16 @@ function inertTitleAgent() {
     logger: { error: () => {} },
     sessions: {},
   } as any;
+}
+
+/** Story 016: a real `EscalationRegistry` whose final updates go nowhere, for
+ *  sessions whose test does not watch classifier escalations. */
+export function inertEscalations(sessionId = "test-session") {
+  return new EscalationRegistry({
+    sessionId,
+    emit: () => {},
+    logger: { log: () => {}, error: () => {} },
+  });
 }
 
 /** Build the replayed `user` message the SDK echoes back for a pushed prompt,
@@ -96,6 +107,10 @@ export function mockSessionState(
     taskState: new Map(),
     toolUseCache: {},
     emittedToolCalls: new Set(),
+    // Story 016: a suite that watches the final update passes its own
+    // registry (or a double) through `overrides`.
+    escalations: inertEscalations(sessionId),
+    classifierGrants: new GrantStore(),
     liveBackgroundTasks: new Map(),
     emittedAssistantText: false,
     owedTrailingIdles: 0,

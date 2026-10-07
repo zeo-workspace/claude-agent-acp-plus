@@ -157,8 +157,12 @@ describe("createSession options merging", () => {
       },
     });
 
-    // User's PreToolUse hooks should be preserved
-    expect(capturedOptions!.hooks?.PreToolUse).toEqual([userPreToolUseHook]);
+    // User's PreToolUse hooks should be preserved, first; story 016's grant
+    // hook is appended last.
+    const preToolUse = capturedOptions!.hooks?.PreToolUse;
+    expect(preToolUse?.[0]).toBe(userPreToolUseHook);
+    expect(preToolUse).toHaveLength(2);
+    expect(preToolUse?.at(-1)?.hooks).toHaveLength(1);
     // PostToolUse should contain both user and ACP hooks
     expect(capturedOptions!.hooks?.PostToolUse).toHaveLength(2);
   });
