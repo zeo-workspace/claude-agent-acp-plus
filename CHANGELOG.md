@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.25.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.24.0...v0.25.0) (2026-10-07)
+
+
+### Features
+
+* **016:** prove classifier escalation end to end and mirror it ([02aeccc](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/02aeccc7700d8711fa1e71e2edf677d01dc21b7c))
+
+
+### Bug Fixes
+
+* **022:** hold quick foreground shell tasks out of the task feed ([bc0dd7f](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/bc0dd7f132d2bc1067010879b9c9817f8802b81c))
+* **029:** mirror the auto-mode-only grant and document it ([d569376](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/d56937640377c8e4c5805c295186b6dbf21bbee6))
+
+
+### Miscellaneous Chores
+
+* **deps:** bump source-map-js to 1.2.2 for GHSA-68fv-2mgg-jv7q ([#141](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/141)) ([13087c5](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/13087c57ecb2800535c89e7249267a658fbe73da))
+
 ## [0.24.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.23.6...v0.24.0) (2026-10-04)
 
 
