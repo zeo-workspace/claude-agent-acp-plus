@@ -68,6 +68,10 @@ never written to a settings or project file, and end with the session (an unused
 its turn). Cancelling the turn withdraws the request. Denials from deny rules, `dontAsk` mode,
 hooks or other modes are reported as before, with no prompt.
 
+A grant applies only while the session is in `auto` mode. In any other mode it is held, not
+lost: that mode's own permission checks decide, and the grant applies again once the session is
+back in `auto`. A deny rule always wins over a grant.
+
 ### Task feed
 
 The agent's background shells, subagents, monitors and workflows are published as one table per

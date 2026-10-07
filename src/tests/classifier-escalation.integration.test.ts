@@ -134,6 +134,8 @@ function hookInput(
   return {
     hook_event_name: event,
     session_id: "sdk-session",
+    // Story 029: the escalation and its grants live in auto mode.
+    permission_mode: "auto",
     transcript_path: "/tmp/t.jsonl",
     cwd: process.cwd(),
     tool_name: "Bash",

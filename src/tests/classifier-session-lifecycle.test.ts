@@ -104,6 +104,8 @@ async function preToolUse(options: Options, id: string, command: string) {
     {
       hook_event_name: "PreToolUse",
       session_id: "sdk-session",
+      // Story 029: grants apply in auto mode only.
+      permission_mode: "auto",
       transcript_path: "/tmp/t.jsonl",
       cwd: process.cwd(),
       tool_name: "Bash",
