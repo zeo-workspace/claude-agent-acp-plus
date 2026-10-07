@@ -78,6 +78,11 @@ export class GrantStore {
     this.session.add(fp);
   }
 
+  /** Whether a grant matches, without consuming it. */
+  has(fp: string): boolean {
+    return this.session.has(fp) || this.once.has(fp);
+  }
+
   /** A session grant wins and stays; a once grant is deleted when consumed. */
   consume(fp: string): GrantKind | undefined {
     if (this.session.has(fp)) return "session";
@@ -645,10 +650,23 @@ async function askWithBounds(
 
 const GRANT_ALLOW_REASON = "approved by the operator after a classifier denial";
 
+/** The hook input's mode as a log token: never free text from the input. */
+function modeToken(mode: unknown): string {
+  if (typeof mode !== "string") return "none";
+  const token = mode.replace(/[^\w-]/gu, "").slice(0, 32);
+  return token || "none";
+}
+
 /**
  * The `PreToolUse` side: a call matching a grant is allowed before the
  * classifier sees it — measured in Task 1 to skip the classifier. Anything else
  * returns `{}` and the CLI decides as usual.
+ *
+ * A grant answers a classifier denial, so it applies only while the CLI reports
+ * `auto` for this very call (story 029). In any other mode — or with no mode —
+ * it is held, not consumed: that mode's own checks decide, and the grant is
+ * still there when the session returns to `auto`. The mode is read from the
+ * hook input, never from the adapter's session state, which can lag a switch.
  */
 export function createGrantPreToolUseHook(
   session: { sessionId: string; classifierGrants: GrantStore },
@@ -658,6 +676,15 @@ export function createGrantPreToolUseHook(
     if (input.hook_event_name !== "PreToolUse") return {};
     const fp = fingerprint(input.tool_name, input.tool_input);
     if (fp === undefined) return {};
+    const mode: unknown = input.permission_mode;
+    if (mode !== "auto") {
+      if (session.classifierGrants.has(fp)) {
+        logger.log(
+          `classifier escalation: grant held level=info sessionId=${session.sessionId} toolUseId=${toolUseID ?? input.tool_use_id} toolName=${input.tool_name} mode=${modeToken(mode)}`,
+        );
+      }
+      return {};
+    }
     const kind = session.classifierGrants.consume(fp);
     if (!kind) return {};
     logger.log(

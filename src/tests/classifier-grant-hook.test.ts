@@ -41,6 +41,8 @@ function call(toolUseId: string, input: unknown, toolName = "Bash") {
   return {
     hook_event_name: "PreToolUse",
     session_id: "sess-1",
+    // Story 029: grants apply in auto mode only, which is what these cases describe.
+    permission_mode: "auto",
     transcript_path: "/tmp/t.jsonl",
     cwd: "/work",
     tool_name: toolName,
