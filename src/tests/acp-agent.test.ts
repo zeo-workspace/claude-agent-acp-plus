@@ -60,7 +60,8 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "crypto";
 import { readFile } from "node:fs/promises";
-import { mockSessionState, userEcho, wrapQuery } from "./session-doubles.js";
+import { inertEscalations, mockSessionState, userEcho, wrapQuery } from "./session-doubles.js";
+import { GrantStore } from "../classifier-escalation.js";
 import {
   GOAL_CONTROL_METHOD,
   goalUpdateFromPrompt,
@@ -2700,6 +2701,8 @@ describe("permission request cancellation", () => {
       taskState: new Map(),
       toolUseCache: {},
       emittedToolCalls: new Set(),
+      escalations: inertEscalations(),
+      classifierGrants: new GrantStore(),
       liveBackgroundTasks: new Map(),
       emittedAssistantText: false,
       owedTrailingIdles: 0,
@@ -6851,6 +6854,8 @@ describe("session/close", () => {
       taskState: new Map(),
       toolUseCache: {},
       emittedToolCalls: new Set(),
+      escalations: inertEscalations(),
+      classifierGrants: new GrantStore(),
       liveBackgroundTasks: new Map(),
       emittedAssistantText: false,
       owedTrailingIdles: 0,
@@ -6949,6 +6954,8 @@ describe("session/delete", () => {
       taskState: new Map(),
       toolUseCache: {},
       emittedToolCalls: new Set(),
+      escalations: inertEscalations(),
+      classifierGrants: new GrantStore(),
       liveBackgroundTasks: new Map(),
       emittedAssistantText: false,
       owedTrailingIdles: 0,
@@ -7063,6 +7070,8 @@ describe("getOrCreateSession param change detection", () => {
       taskState: new Map(),
       toolUseCache: {},
       emittedToolCalls: new Set(),
+      escalations: inertEscalations(),
+      classifierGrants: new GrantStore(),
       liveBackgroundTasks: new Map(),
       emittedAssistantText: false,
       owedTrailingIdles: 0,
@@ -10116,6 +10125,8 @@ describe("post-error recovery", () => {
       taskState: new Map(),
       toolUseCache: {},
       emittedToolCalls: new Set(),
+      escalations: inertEscalations(),
+      classifierGrants: new GrantStore(),
       liveBackgroundTasks: new Map(),
       emittedAssistantText: false,
       owedTrailingIdles: 0,
@@ -14510,6 +14521,8 @@ describe("session/cancel wedge recovery (issue #680)", () => {
       taskState: new Map(),
       toolUseCache: {},
       emittedToolCalls: new Set(),
+      escalations: inertEscalations(),
+      classifierGrants: new GrantStore(),
       liveBackgroundTasks: new Map(),
       emittedAssistantText: false,
       owedTrailingIdles: 0,
@@ -15951,6 +15964,8 @@ describe("agent selection config option", () => {
         taskState: new Map(),
         toolUseCache: {},
         emittedToolCalls: new Set(),
+        escalations: inertEscalations(),
+        classifierGrants: new GrantStore(),
         liveBackgroundTasks: new Map(),
         emittedAssistantText: false,
         owedTrailingIdles: 0,

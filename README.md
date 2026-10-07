@@ -37,6 +37,7 @@ On top of upstream, aimed at parity with the Claude Code VS Code extension:
 - **Ultracode** in the effort picker, and a model picker that offers only the newest model of each family
 - **Per-session account selection**, and an agent name taken from the installed package
 - Permission prompts that honour the CLI's `defaultToNo` and `suppressAlwaysAllowRule`
+- **Classifier denials ask instead of failing** — in `auto` mode, a call the classifier blocks becomes a permission prompt (see [Classifier denials](#classifier-denials))
 
 ### Nested subagent transcripts
 
@@ -48,6 +49,24 @@ with `_meta.claudeCode.subagent = true`.
 
 Clients that do not advertise the capability retain the legacy flattened behavior. In both modes,
 the normal Agent/Task tool result is preserved as the protocol-compatible fallback.
+
+### Classifier denials
+
+In `auto` permission mode the CLI's classifier decides alone whether a tool call may run. When it
+refuses one, the agent asks the client instead of failing the call: one permission request for
+that call, showing the command (or an input summary) and the classifier's reason, with three
+answers:
+
+- **Yes** — the model is told it may retry, and its next identical call in this turn runs without
+  the classifier, once
+- **Yes for this session** — every later identical call in this session skips the classifier
+- **No** — the call fails with the classifier's reason, exactly as before
+
+"Identical" means the same tool and the same input, except a Bash call's `description`, which the
+model rewrites on retry. Neither answer is permanent: grants live in the agent's memory only, are
+never written to a settings or project file, and end with the session (an unused "Yes" ends with
+its turn). Cancelling the turn withdraws the request. Denials from deny rules, `dontAsk` mode,
+hooks or other modes are reported as before, with no prompt.
 
 ### Task feed
 

@@ -241,6 +241,13 @@ import {
 export { DEFAULT_AGENT_ID, EFFORT_CONFIG_ID } from "./session-config-ids.js";
 import { MODE_CONFIG_ID, SessionModeManager } from "./session-mode.js";
 import { TASKS_META_KEY, TaskFeed, TaskFeedPublisher } from "./task-feed.js";
+import {
+  EscalationRegistry,
+  GrantStore,
+  createAskOperator,
+  createGrantPreToolUseHook,
+  createPermissionDeniedHook,
+} from "./classifier-escalation.js";
 
 export const CLAUDE_CONFIG_DIR =
   process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
@@ -966,6 +973,16 @@ export type Session = {
    *  tool_use block streams; this set makes the two paths converge regardless of
    *  order. Pruned at `tool_result` time alongside `toolUseCache`. */
   emittedToolCalls: Set<string>;
+  /** Story 016: orders the `permission_denied` frame and the
+   *  `PermissionDenied` hook of a classifier denial, keyed by tool_use_id, and
+   *  sends the denied call its one final `tool_call_update`. Lives and dies
+   *  with the session; it holds nothing outside it. */
+  escalations: EscalationRegistry;
+  /** Story 016: the operator's "Yes" / "Yes for this session" answers to a
+   *  classifier denial, by fingerprint. Per session (R3.3); the one-shot half
+   *  is dropped when a turn settles (R2.4), all of it when the session's
+   *  stream closes (R3.2). */
+  classifierGrants: GrantStore;
   /** ExitPlanMode denial that intentionally interrupts the current Claude
    *  cycle. Correlated by tool-use id until the terminal result arrives. */
   pendingExitPlanModeInterruption?: {
@@ -1894,13 +1911,13 @@ export class ClaudeAcpAgent {
       },
       settleCancelledTurn: (original, session, turn) => {
         disarmForceCancel(session);
-        this.finishFileChangeAudit(session, turn, "cancelled");
+        this.endTurnScope(session, turn, "cancelled");
         turn.settled = true;
         turn.resolve({ stopReason: "cancelled", usage: sessionUsage(original) });
       },
       settleFailedTurn: (session, turn, error) => {
         disarmForceCancel(session);
-        this.finishFileChangeAudit(session, turn, "providerError");
+        this.endTurnScope(session, turn, "providerError");
         turn.settled = true;
         turn.reject(error);
       },
@@ -2893,6 +2910,19 @@ export class ClaudeAcpAgent {
     return { outcome: "injected" };
   }
 
+  /** Everything scoped to one turn, released on every path that settles it
+   *  (result, cancel, failure, stream death): story 016's unused "Yes" grants
+   *  (R2.4), then the file-change audit terminal. Every turn-settle site calls
+   *  this right before flipping `settled`. */
+  private endTurnScope(
+    session: Session,
+    turn: Turn,
+    reason: FileChangeReportUnavailableReason,
+  ): void {
+    session.classifierGrants.clearOnce();
+    this.finishFileChangeAudit(session, turn, reason);
+  }
+
   /** Publish the audit terminal for every turn path that did not reach the
    *  report tool. The support flips the turn state synchronously before its
    *  transport await, so callers can stay fail-open and settle the ACP prompt
@@ -3523,7 +3553,7 @@ export class ClaudeAcpAgent {
       if (!turn || turn.settled) {
         return;
       }
-      this.finishFileChangeAudit(session, turn, auditReason);
+      this.endTurnScope(session, turn, auditReason);
       // Captured before the settled flip below (isHeldOpen tests !settled).
       const wasHeld = isHeldOpen(turn);
       turn.settled = true;
@@ -3563,7 +3593,7 @@ export class ClaudeAcpAgent {
         );
         return;
       }
-      this.finishFileChangeAudit(session, turn, "providerError");
+      this.endTurnScope(session, turn, "providerError");
       turn.settled = true;
       turn.usageMarkdownAbort?.abort();
       session.turnQueue = (session.turnQueue ?? []).filter((t) => t !== turn);
@@ -3626,7 +3656,7 @@ export class ClaudeAcpAgent {
       session.turnQueue = [];
       for (const turn of turns) {
         if (!turn.settled) {
-          this.finishFileChangeAudit(session, turn, "providerError");
+          this.endTurnScope(session, turn, "providerError");
           const wasHeld = isHeldOpen(turn);
           turn.settled = true;
           turn.usageMarkdownAbort?.abort();
@@ -3829,7 +3859,7 @@ export class ClaudeAcpAgent {
           // still here was enqueued afterward and was not part of the cancel.)
           for (const queued of [...(session.turnQueue ?? [])]) {
             if (!queued.settled) {
-              this.finishFileChangeAudit(session, queued, "providerError");
+              this.endTurnScope(session, queued, "providerError");
               queued.settled = true;
               queued.reject(RequestError.internalError(undefined, SESSION_ENDED_MESSAGE));
             }
@@ -4355,9 +4385,7 @@ export class ClaudeAcpAgent {
                 // fallback in `toAcpNotifications` gates on `wasEmitted` for.
                 // Drop the update rather than reference a tool call the client
                 // was never given (see `ensureToolCallEmitted`, issue #851).
-                if (!session.emittedToolCalls.has(message.tool_use_id)) {
-                  break;
-                }
+                //
                 // A denial inside a subagent identifies the subagent by
                 // `agent_id` (as canUseTool does with `agentID`), never by the
                 // Agent/Task call that spawned it. Resolve it the same way so
@@ -4368,6 +4396,37 @@ export class ClaudeAcpAgent {
                   ? session.liveBackgroundTasks.get(message.agent_id)?.parentToolUseId
                   : undefined;
                 const reason = message.decision_reason ?? message.message;
+                const meta = {
+                  claudeCode: {
+                    toolName: message.tool_name,
+                    ...(parentToolUseId ? { parentToolUseId } : {}),
+                    toolResponse: {
+                      decisionReasonType: message.decision_reason_type,
+                      decisionReason: message.decision_reason,
+                      message: message.message,
+                    },
+                  },
+                } satisfies ToolUpdateMeta;
+                // Story 016: every frame is noted first, whatever its reason
+                // type — the `PermissionDenied` hook may be waiting on it to
+                // learn whether this denial is the classifier's.
+                session.escalations.noteFrame({
+                  toolUseId: message.tool_use_id,
+                  reasonType: message.decision_reason_type,
+                  reason,
+                  agentId: message.agent_id,
+                  meta,
+                  emitted: session.emittedToolCalls.has(message.tool_use_id),
+                });
+                // A classifier denial asks the operator instead of failing:
+                // the call stays pending, and the registry sends its one final
+                // update (approved, rejected with today's text, or cancelled).
+                if (message.decision_reason_type === "classifier") {
+                  break;
+                }
+                if (!session.emittedToolCalls.has(message.tool_use_id)) {
+                  break;
+                }
                 await sendUpdate({
                   sessionId: params.sessionId,
                   update: {
@@ -4380,17 +4439,7 @@ export class ClaudeAcpAgent {
                         content: { type: "text", text: `Permission denied: ${reason}` },
                       },
                     ],
-                    _meta: {
-                      claudeCode: {
-                        toolName: message.tool_name,
-                        ...(parentToolUseId ? { parentToolUseId } : {}),
-                        toolResponse: {
-                          decisionReasonType: message.decision_reason_type,
-                          decisionReason: message.decision_reason,
-                          message: message.message,
-                        },
-                      },
-                    } satisfies ToolUpdateMeta,
+                    _meta: meta,
                   },
                 });
                 break;
@@ -5831,6 +5880,17 @@ export class ClaudeAcpAgent {
                     : undefined,
               },
             )) {
+              // Story 016 (R2.5): the CLI still sends an `is_error` result for
+              // a classifier-denied call the operator approved after the hook
+              // returns. The registry already finished that call with
+              // "approved, will run again"; a failed update now would
+              // contradict it, so it is not sent.
+              if (
+                notification.update.sessionUpdate === "tool_call_update" &&
+                session.escalations.wasApproved(notification.update.toolCallId)
+              ) {
+                continue;
+              }
               // sendUpdate records delivery. Subagent text/thinking is
               // filtered out of `content` above; blocks that do pass through
               // (e.g. a subagent image) carry the stamped parentToolUseId
@@ -6106,7 +6166,7 @@ export class ClaudeAcpAgent {
     if (session.turnQueue) {
       for (const turn of session.turnQueue) {
         if (turn !== session.activeTurn && !turn.settled) {
-          this.finishFileChangeAudit(session, turn, "cancelled");
+          this.endTurnScope(session, turn, "cancelled");
           turn.settled = true;
           // Deliberately no `usage`: a queued turn never ran, so the session
           // accumulator (the active turn's tally) is not its spend.
@@ -6181,7 +6241,7 @@ export class ClaudeAcpAgent {
     {
       const active = session.activeTurn;
       if (isHeldOpen(active)) {
-        this.finishFileChangeAudit(session, active, "cancelled");
+        this.endTurnScope(session, active, "cancelled");
         active.settled = true;
         // Mirror settleActive's invariants (it is consumer-scoped and
         // unreachable from here): disarm the backstop — none should be
@@ -6344,6 +6404,11 @@ export class ClaudeAcpAgent {
     session.input.end();
     session.query.close();
     this.retireTaskFeed(session);
+    // Story 016 (R3.2): grants and escalation records die with the stream —
+    // the same reason the quota timer is cleared here. A replacement under the
+    // same id (clear-context restart, provider update) starts with fresh ones.
+    session.classifierGrants.clear();
+    session.escalations.clear();
   }
 
   /** The session's CLI process is gone for good: whatever it was running did
@@ -6811,8 +6876,11 @@ export class ClaudeAcpAgent {
    *  while the client's prompt is still open the signal aborts, the SDK sends
    *  `$/cancel_request`, and our local abort race settles even if the client
    *  ignores it. A `cancelled` outcome, request rejection, and local abort all
-   *  surface the same "Tool use aborted" the callers already expect. */
-  private async requestPermissionFromClient(
+   *  surface the same "Tool use aborted" the callers already expect.
+   *  Not private: the classifier-escalation question (story 016,
+   *  `createAskOperator`) goes through it too, for the same emitted tool call
+   *  and the same pending-user-input accounting. */
+  async requestPermissionFromClient(
     params: RequestPermissionRequest,
     toolName: string,
     signal: AbortSignal,
@@ -8137,6 +8205,25 @@ export class ClaudeAcpAgent {
     // the same Map that the streaming message handler will read from.
     const taskState: TaskState = new Map();
 
+    // Story 016: the grant store and the escalation registry are built before
+    // the options for the same reason — the PermissionDenied and grant hooks
+    // close over them, and the session record below adopts these very objects.
+    const classifierGrants = new GrantStore();
+    const escalations = new EscalationRegistry({
+      sessionId,
+      // The final update carries the frame's own `_meta` (tool name, parent
+      // stamp resolved through `liveBackgroundTasks`), so it lands in the
+      // same transcript as today's failed update would.
+      emit: (_toolUseId, update) => {
+        // The same suppression the prompt-scoped `sendUpdate` applies.
+        if (isFileChangeAuditReportPhase(this.sessions[sessionId]?.activeTurn?.fileChangeAudit)) {
+          return;
+        }
+        return this.client.sessionUpdate({ sessionId, update });
+      },
+      logger: this.logger,
+    });
+
     // Resolve every workspace root once. The hidden report tool uses this same
     // set for lexical path validation, and the SDK receives it below.
     const acpAdditionalDirectories =
@@ -8323,14 +8410,14 @@ export class ClaudeAcpAgent {
       tools,
       hooks: {
         ...userProvidedOptions?.hooks,
-        ...(fileChangeAuditSupport
-          ? {
-              PreToolUse: [
-                ...(userProvidedOptions?.hooks?.PreToolUse || []),
-                { hooks: [fileChangeAuditSupport.preToolUseHook] },
-              ],
-            }
-          : {}),
+        // Story 016: the grant hook runs last, after the user's hooks and the
+        // file-change audit hook, so it can only add an allow for a call the
+        // operator approved — never pre-empt what comes before it.
+        PreToolUse: [
+          ...(userProvidedOptions?.hooks?.PreToolUse || []),
+          ...(fileChangeAuditSupport ? [{ hooks: [fileChangeAuditSupport.preToolUseHook] }] : []),
+          { hooks: [createGrantPreToolUseHook({ sessionId, classifierGrants }, this.logger)] },
+        ],
         PostToolUse: [
           ...(userProvidedOptions?.hooks?.PostToolUse || []),
           {
@@ -8372,6 +8459,25 @@ export class ClaudeAcpAgent {
                 onChange: () => this.publishTaskPlan(sessionId, taskState),
               }),
             ],
+          },
+        ],
+        // Story 016: a classifier denial becomes a question to the operator.
+        // `timeout` is in seconds: the CLI default is far shorter than a human
+        // answer, and the hook bounds itself at 590 s so the adapter decides.
+        // The operator is resolved by session id at ask time; a session gone
+        // by then fails the ask, and the hook grants nothing (fail closed).
+        PermissionDenied: [
+          ...(userProvidedOptions?.hooks?.PermissionDenied || []),
+          {
+            hooks: [
+              createPermissionDeniedHook({
+                session: { sessionId, classifierGrants },
+                logger: this.logger,
+                escalations,
+                askOperator: createAskOperator(this, sessionId),
+              }),
+            ],
+            timeout: 600,
           },
         ],
       },
@@ -8711,6 +8817,8 @@ export class ClaudeAcpAgent {
       taskState,
       toolUseCache: {},
       emittedToolCalls: new Set(),
+      escalations,
+      classifierGrants,
       liveBackgroundTasks: new Map(),
       ...this.createTaskFeed(sessionId),
       emittedAssistantText: false,

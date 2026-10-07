@@ -79,7 +79,9 @@ type RegisteredAuditTool = {
 };
 
 function hookFrom(options: Options, event: "PreToolUse" | "Stop"): HookCallback {
-  const matcher = options.hooks?.[event]?.at(-1);
+  // Story 016 appends its classifier-grant hook after the audit's PreToolUse
+  // hook, so the audit's matcher is the second-to-last there.
+  const matcher = options.hooks?.[event]?.at(event === "PreToolUse" ? -2 : -1);
   const hook = matcher?.hooks.at(-1);
   if (!hook) throw new Error(`Missing ${event} audit hook`);
   return hook;
