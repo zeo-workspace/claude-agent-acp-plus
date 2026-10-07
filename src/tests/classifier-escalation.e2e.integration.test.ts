@@ -33,8 +33,11 @@ const PROBE_COMMAND = process.env.CLASSIFIER_PROBE_COMMAND ?? "git push --force 
  * `cmd.txt` rather than named in the prompt — a prompt that names the action
  * and its target counts as explicit user intent and clears the soft deny.
  */
+const workspaceRoots: string[] = [];
+
 function probeWorkspace(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "classifier-e2e-"));
+  workspaceRoots.push(root);
   const cwd = path.join(root, "work");
   const git = (args: string[], dir: string) => {
     const result = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
@@ -78,6 +81,7 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)(
     });
 
     afterAll(() => {
+      for (const root of workspaceRoots) fs.rmSync(root, { recursive: true, force: true });
       for (const child of children) child.kill();
     });
 
@@ -106,7 +110,13 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)(
         )
         .connect(stream);
       await ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
-      const { sessionId } = await ctx.request(methods.agent.session.new, { cwd, mcpServers: [] });
+      // No user, project or local settings: the operator's own CLAUDE.md, allow
+      // rules and hooks must not decide whether the model even tries the probe.
+      const { sessionId } = await ctx.request(methods.agent.session.new, {
+        cwd,
+        mcpServers: [],
+        _meta: { claudeCode: { options: { settingSources: [] } } },
+      });
       await ctx.request(methods.agent.session.setConfigOption, {
         sessionId,
         configId: "mode",
