@@ -231,6 +231,8 @@ async function* cliTurn(input: Pushable<any>, options: Options) {
       await sleep(5600);
       break;
     }
+    default:
+      throw new Error(`unknown scenario order: ${String(scenario.order)}`);
   }
   if (scenario.toolResultAfterHook) yield deniedToolResult(parent);
 
