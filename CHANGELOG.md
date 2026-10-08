@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.25.3](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.25.2...v0.25.3) (2026-10-08)
+
+
+### Bug Fixes
+
+* **016:** keep client and model text out of the escalation log lines ([8ea211a](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/8ea211ac9f5fd453e029398f8ca6d4676bdef8f1))
+
+
+### Continuous Integration
+
+* **release:** let preflight match a reusable workflow's suffixed check name ([0e6a47d](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/0e6a47d51c0c6a587abb0df469f11d7bd77d6c42))
+
 ## [0.25.2](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.25.1...v0.25.2) (2026-10-08)
 
 
