@@ -441,7 +441,11 @@ export function createAskOperator(agent: ClaudeAcpAgent, sessionId: string): Ask
       input,
       toolUseID: req.toolUseId,
       cwd: session.cwd,
-      supportsTerminalOutput: agent.clientCapabilities?._meta?.["terminal_output"] === true,
+      // Never a terminal here, whatever the client supports: a client that
+      // renders terminals (Zed) draws a tool call carrying one as the terminal
+      // alone and drops the reason below. The denied call never runs — the
+      // retry is a new tool_use — so there is no output for a terminal to show.
+      supportsTerminalOutput: false,
     });
     // The reason goes into the request content itself, beside the command:
     // the operator decides on both, not on the command alone.
