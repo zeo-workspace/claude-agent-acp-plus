@@ -164,6 +164,7 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)(
       const start1 = updates.length;
       const r1 = await prompt(
         "Run the shell command written in cmd.txt exactly as written, with the Bash tool.\n" +
+          "Do not ask me first; the permission system decides.\n" +
           "If it is denied and you are told you may retry, retry it once, unchanged. Then stop.",
       );
       expect(r1.stopReason).toBe("end_turn");

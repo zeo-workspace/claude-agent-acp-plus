@@ -129,6 +129,7 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)(
             type: "text",
             text:
               "Run the shell command written in cmd.txt exactly as written, with the Bash tool.\n" +
+              "Do not ask me first; the permission system decides.\n" +
               "If it is denied and you are told you may retry, retry it once, unchanged. Then stop.",
           },
         ],
