@@ -316,7 +316,7 @@ export class EscalationRegistry {
   private send(toolUseId: string, update: ToolCallUpdate): void {
     const warn = (error: unknown) =>
       this.logger.log(
-        `classifier escalation: final tool_call_update failed level=warn sessionId=${this.sessionId} toolUseId=${toolUseId} error=${String(error)}`,
+        `classifier escalation: final tool_call_update failed level=warn sessionId=${this.sessionId} toolUseId=${toolUseId} error=${errorKind(error)}`,
       );
     try {
       void Promise.resolve(this.emit(toolUseId, update)).catch(warn);
@@ -518,7 +518,7 @@ export function createPermissionDeniedHook(deps: PermissionDeniedHookDeps): Hook
     // Never the command or the input: ids, tool name and outcome only (R6.3).
     const line = (level: "info" | "warn", event: string, fields: string) =>
       logger.log(
-        `classifier escalation: ${event} level=${level} sessionId=${sessionId} toolUseId=${toolUseId} toolName=${toolName} ${fields}`,
+        `classifier escalation: ${event} level=${level} sessionId=${sessionId} toolUseId=${toolUseId} toolName=${logToken(toolName)} ${fields}`,
       );
 
     let claimed = false;
@@ -599,7 +599,7 @@ export function createPermissionDeniedHook(deps: PermissionDeniedHookDeps): Hook
       if (claimed) escalations.resolve(toolUseId, "rejected");
       else escalations.abandon(toolUseId);
       logger.error(
-        `classifier escalation: hook failed level=error sessionId=${sessionId} toolUseId=${toolUseId} toolName=${toolName} error=${errorKind(error)}`,
+        `classifier escalation: hook failed level=error sessionId=${sessionId} toolUseId=${toolUseId} toolName=${logToken(toolName)} error=${errorKind(error)}`,
       );
       return {};
     }
@@ -654,10 +654,14 @@ async function askWithBounds(
 
 const GRANT_ALLOW_REASON = "approved by the operator after a classifier denial";
 
-/** The hook input's mode as a log token: never free text from the input. */
-function modeToken(mode: unknown): string {
-  if (typeof mode !== "string") return "none";
-  const token = mode.replace(/[^\w-]/gu, "").slice(0, 32);
+/**
+ * A value from the hook input as a log token — a mode or a tool name, both
+ * chosen outside the adapter (an MCP tool's name is model-steerable): word
+ * characters and dashes only, capped, so it cannot forge a field or a line.
+ */
+function logToken(value: unknown): string {
+  if (typeof value !== "string") return "none";
+  const token = value.replace(/[^\w-]/gu, "").slice(0, 64);
   return token || "none";
 }
 
@@ -684,7 +688,7 @@ export function createGrantPreToolUseHook(
     if (mode !== "auto") {
       if (session.classifierGrants.has(fp)) {
         logger.log(
-          `classifier escalation: grant held level=info sessionId=${session.sessionId} toolUseId=${toolUseID ?? input.tool_use_id} toolName=${input.tool_name} mode=${modeToken(mode)}`,
+          `classifier escalation: grant held level=info sessionId=${session.sessionId} toolUseId=${toolUseID ?? input.tool_use_id} toolName=${logToken(input.tool_name)} mode=${logToken(mode)}`,
         );
       }
       return {};
@@ -692,7 +696,7 @@ export function createGrantPreToolUseHook(
     const kind = session.classifierGrants.consume(fp);
     if (!kind) return {};
     logger.log(
-      `classifier escalation: grant consumed level=info sessionId=${session.sessionId} toolUseId=${toolUseID ?? input.tool_use_id} toolName=${input.tool_name} grant=${kind}`,
+      `classifier escalation: grant consumed level=info sessionId=${session.sessionId} toolUseId=${toolUseID ?? input.tool_use_id} toolName=${logToken(input.tool_name)} grant=${kind}`,
     );
     return {
       hookSpecificOutput: {
