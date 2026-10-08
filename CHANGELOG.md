@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.2](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.25.1...v0.25.2) (2026-10-08)
+
+
+### Bug Fixes
+
+* **016:** show the classifier's reason on the escalation card in Zed ([47af503](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/47af503ce179450d30548585463cdd589486c0a4))
+
 ## [0.25.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.25.0...v0.25.1) (2026-10-08)
 
 
