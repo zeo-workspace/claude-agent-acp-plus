@@ -154,6 +154,12 @@ required_json=$(jq_string_array "${REQUIRED_CHECKS[@]}")
 # never consulted: CodeQL runs on these PRs through GitHub's default
 # code-scanning setup and can fail for reasons this guard does not own.
 #
+# A job a reusable workflow runs is named "<caller job> / <inner job>" — the
+# hosted OSV run is "Dependency scan (OSV-Scanner) / osv-scan" — so an entry
+# also answers to its required name followed by " / ". The exact name is taken
+# first: it is what ci-attest.sh publishes, and a failed attestation must not be
+# outvoted by a hosted run. A name that merely starts the same way does not count.
+#
 # Read it downwards: take the rollup, walk the four required names, find the
 # entry for each, work out its state, and keep only the ones that are not a
 # success. $rollup, $want, $entry and $got are jq's variables, not the shell's,
@@ -165,7 +171,9 @@ not_passing=$(gh pr view "$pr_number" --repo "$repo" --json statusCheckRollup --
   (.statusCheckRollup // []) as $rollup
   | '"$required_json"'[]
   | . as $want
-  | ($rollup | map(select((.name // .context) == $want)) | first) as $entry
+  | ($rollup | map(select((.name // .context) == $want))
+      + map(select((.name // "") | startswith($want + " / ")))
+    | first) as $entry
   | (if $entry == null then "MISSING" else ($entry | outcome) end) as $got
   | select($got != "SUCCESS")
   | "\($want) is \($got)"')

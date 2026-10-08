@@ -195,3 +195,55 @@ preflight() {
   ! grep -qE 'commits/|/statuses/|--json commits' "$GH_LOG"
   ! grep -q '2222222222222222222222222222222222222222' "$GH_LOG"
 }
+
+# A job called from a reusable workflow surfaces as "<caller job name> / <inner
+# job name>" — Security's OSV job is `uses: osv-scanner-reusable.yml`, so the
+# hosted run is "Dependency scan (OSV-Scanner) / osv-scan". Release PRs get
+# hosted runs since they are opened with an App token, and the guard read that
+# passing scan as MISSING (release 0.25.2, PR #148).
+
+@test "recognises a required check run that a reusable workflow suffixed" {
+  rollup "$(check_run Build SUCCESS)" \
+    "$(check_run 'Secret scan (gitleaks)' SUCCESS)" \
+    "$(check_run 'Dependency scan (OSV-Scanner) / osv-scan' SUCCESS)" \
+    "$(check_run 'npm audit' SUCCESS)"
+
+  run preflight
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Ready to release 0.8.0"* ]]
+}
+
+@test "a failing suffixed run is reported, not passed" {
+  rollup "$(check_run Build SUCCESS)" \
+    "$(check_run 'Secret scan (gitleaks)' SUCCESS)" \
+    "$(check_run 'Dependency scan (OSV-Scanner) / osv-scan' FAILURE)" \
+    "$(check_run 'npm audit' SUCCESS)"
+
+  run preflight
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Dependency scan (OSV-Scanner) is FAILURE"* ]]
+}
+
+@test "a name that only starts like a required one does not stand in for it" {
+  rollup "$(check_run Build SUCCESS)" \
+    "$(check_run 'Secret scan (gitleaks)' SUCCESS)" \
+    "$(check_run 'Dependency scan (OSV-Scanner)-fork / osv-scan' SUCCESS)" \
+    "$(check_run 'Dependency scan (OSV-Scanner) mirror' SUCCESS)" \
+    "$(check_run 'npm audit' SUCCESS)"
+
+  run preflight
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Dependency scan (OSV-Scanner) is MISSING"* ]]
+}
+
+@test "an exact entry wins over a suffixed one: a failed attestation still blocks" {
+  rollup "$(check_run Build SUCCESS)" \
+    "$(check_run 'Secret scan (gitleaks)' SUCCESS)" \
+    "$(check_run 'Dependency scan (OSV-Scanner) / osv-scan' SUCCESS)" \
+    "$(status_context 'Dependency scan (OSV-Scanner)' FAILURE)" \
+    "$(check_run 'npm audit' SUCCESS)"
+
+  run preflight
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Dependency scan (OSV-Scanner) is FAILURE"* ]]
+}
