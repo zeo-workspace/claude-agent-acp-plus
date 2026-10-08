@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.25.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.25.0...v0.25.1) (2026-10-08)
+
+
+### Continuous Integration
+
+* **release:** authenticate the release App by client ID ([#146](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/146)) ([535acfd](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/535acfda5163652e592d9edd7a621a2283d0ae77))
+* **release:** open release PRs with a GitHub App token ([#144](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/144)) ([4157b9d](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/4157b9d18a2347a28a3fc247430a5897884ed832))
+
 ## [0.25.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.24.0...v0.25.0) (2026-10-07)
 
 
