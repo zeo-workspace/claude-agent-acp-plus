@@ -119,6 +119,8 @@ describe("TaskFeed — a started task (R1.1)", () => {
           usage: null,
           lastTool: null,
           summary: null,
+          hasOutput: false,
+          tail: null,
         },
       ],
     });
