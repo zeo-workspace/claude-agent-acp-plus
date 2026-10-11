@@ -297,11 +297,11 @@ function wire(): Wire {
 }
 
 describe("task feed capability (R2.7)", () => {
-  it('initialize advertises agentCapabilities._meta["_claude/tasks"] = { version: 1 }', async () => {
+  it('initialize advertises agentCapabilities._meta["_claude/tasks"] = { version: 2 } (story 041)', async () => {
     const { agent } = newAgent();
     const response = await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
 
-    expect((response.agentCapabilities as any)?._meta?.["_claude/tasks"]).toEqual({ version: 1 });
+    expect((response.agentCapabilities as any)?._meta?.["_claude/tasks"]).toEqual({ version: 2 });
   });
 
   it("advertises it over the wire, where Zeo reads it", async () => {
@@ -311,7 +311,7 @@ describe("task feed capability (R2.7)", () => {
       clientCapabilities: {},
     });
 
-    expect(response?.agentCapabilities?._meta?.["_claude/tasks"]?.version).toBe(1);
+    expect(response?.agentCapabilities?._meta?.["_claude/tasks"]?.version).toBe(2);
   });
 });
 

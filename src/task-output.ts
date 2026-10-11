@@ -53,7 +53,9 @@ type Window = { bytes: Buffer; totalBytes: number; truncated: boolean };
 async function readWindow(file: string, maxBytes: number): Promise<Window> {
   let handle;
   try {
-    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // O_NONBLOCK: opening a FIFO for reading would otherwise wait for a writer
+    // forever; with it the open returns, and `isFile()` below refuses the FIFO.
+    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     throw unavailable(error);
   }
@@ -135,9 +137,14 @@ const OUTPUT_NOTICE = /Output is being written to: (\S+)/;
  */
 export function outputPathFromBashResult(text: string, taskId: string): string | null {
   const candidate = text.match(OUTPUT_NOTICE)?.[1];
-  if (candidate === undefined) return null;
-  if (!path.isAbsolute(candidate)) return null;
-  if (path.normalize(candidate) !== candidate) return null;
-  if (path.basename(candidate) !== `${taskId}.output`) return null;
-  return candidate;
+  return candidate !== undefined && isOutputPathFor(candidate, taskId) ? candidate : null;
+}
+
+/** True for an absolute, normalized path whose file name is exactly `<taskId>.output`. */
+export function isOutputPathFor(candidate: string, taskId: string): boolean {
+  return (
+    path.isAbsolute(candidate) &&
+    path.normalize(candidate) === candidate &&
+    path.basename(candidate) === `${taskId}.output`
+  );
 }

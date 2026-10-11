@@ -240,7 +240,15 @@ import {
 
 export { DEFAULT_AGENT_ID, EFFORT_CONFIG_ID } from "./session-config-ids.js";
 import { MODE_CONFIG_ID, SessionModeManager } from "./session-mode.js";
-import { TASKS_META_KEY, TaskFeed, TaskFeedPublisher } from "./task-feed.js";
+import {
+  TASKS_CONTRACT_VERSION,
+  TASKS_META_KEY,
+  normaliseStatus,
+  TailPoller,
+  TaskFeed,
+  TaskFeedPublisher,
+} from "./task-feed.js";
+import { OutputUnavailable, outputPathFromBashResult, readOutput } from "./task-output.js";
 import {
   EscalationRegistry,
   GrantStore,
@@ -407,13 +415,19 @@ export const TASKS_STOP_METHOD = "_claude/tasks/stop";
 /** Move a foreground tool call's task to the background (story 012, R2.3).
  *  Params {@link TasksBackgroundRequest}, result {@link TasksBackgroundResponse}. */
 export const TASKS_BACKGROUND_METHOD = "_claude/tasks/background";
-/** `agentCapabilities._meta` key advertising the task feed and its two
- *  methods (R2.7). Zeo gates on this, never on the agent's name — the name is
+/** Read the end of a task's output file (story 041, R2.1). Params
+ *  {@link TasksOutputRequest}, result {@link TasksOutputResponse}. Version 2. */
+export const TASKS_OUTPUT_METHOD = "_claude/tasks/output";
+/** `agentCapabilities._meta` key advertising the task feed and its methods
+ *  (R2.7). Zeo gates on this, never on the agent's name — the name is
  *  `package.json`'s, and differs between this fork and the published mirror. */
 export const TASKS_CAPABILITY_KEY = TASKS_META_KEY;
-export const TASKS_CAPABILITY_VERSION = 1;
+/** Version 2 (story 041) adds `hasOutput`, `tail` and `_claude/tasks/output`. */
+export const TASKS_CAPABILITY_VERSION = TASKS_CONTRACT_VERSION;
 
 export type TasksStopRequest = { sessionId: string; taskId: string };
+export type TasksOutputRequest = { sessionId: string; taskId: string; maxBytes: number };
+export type TasksOutputResponse = { content: string; totalBytes: number; truncated: boolean };
 export type TasksBackgroundRequest = { sessionId: string; toolCallId: string };
 export type TasksBackgroundResponse = { backgrounded: boolean };
 
@@ -444,6 +458,23 @@ export function parseTasksStopRequest(params: unknown): TasksStopRequest {
     sessionId: requireIdField(params, TASKS_STOP_METHOD, "sessionId"),
     taskId: requireIdField(params, TASKS_STOP_METHOD, "taskId"),
   };
+}
+
+/** Validate raw JSON-RPC params into a {@link TasksOutputRequest}. Extra keys —
+ *  a `path` included — are ignored: only a file the adapter recorded is read
+ *  (R2.5). */
+export function parseTasksOutputRequest(params: unknown): TasksOutputRequest {
+  const sessionId = requireIdField(params, TASKS_OUTPUT_METHOD, "sessionId");
+  const taskId = requireIdField(params, TASKS_OUTPUT_METHOD, "taskId");
+  const maxBytes =
+    params && typeof params === "object" ? (params as Record<string, unknown>).maxBytes : undefined;
+  if (typeof maxBytes !== "number" || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw RequestError.invalidParams(
+      undefined,
+      `${TASKS_OUTPUT_METHOD} params require maxBytes, a positive integer`,
+    );
+  }
+  return { sessionId, taskId, maxBytes };
 }
 
 /** Validate raw JSON-RPC params into a {@link TasksBackgroundRequest}. */
@@ -1061,6 +1092,10 @@ export type Session = {
    *  them (R1.9). Absent only on hand-built test sessions. */
   taskFeed?: TaskFeed;
   taskFeedPublisher?: TaskFeedPublisher;
+  /** Story 041: publishes running shells' tails into `taskFeed`. Lives and
+   *  dies with the feed — `retireTaskFeed` disposes it, a query recreate keeps
+   *  it. Absent only on hand-built test sessions. */
+  tailPoller?: TailPoller;
   /** Whether any top-level assistant text reached the client since the last
    *  stretch boundary. Set as a side effect of sending in the consumer's
    *  `sendUpdate`, never at an emission site; read at the terminal `result`
@@ -2792,6 +2827,57 @@ export class ClaudeAcpAgent {
         return {};
       },
     );
+  }
+
+  /**
+   * `_claude/tasks/output`: the end of a task's output file (story 041, R2.1–R2.7).
+   * Serves only a path the feed recorded for its own task, and works on an
+   * ended session too, as long as the session object exists. One log line,
+   * never the content.
+   */
+  async taskOutput(params: TasksOutputRequest): Promise<TasksOutputResponse> {
+    const { sessionId, taskId, maxBytes } = params;
+    const log = (outcome: string, detail: string) =>
+      this.logger.log(
+        `[tasks/output] method=${TASKS_OUTPUT_METHOD} sessionId=${logValue(sessionId)} taskId=${logValue(taskId)} ${detail} outcome=${outcome}`,
+      );
+    const refuse = (error: RequestError, reason: string): never => {
+      log("error", `reason=${logValue(reason)}`);
+      throw error;
+    };
+    const session = Object.hasOwn(this.sessions, sessionId) ? this.sessions[sessionId] : undefined;
+    if (!session) {
+      return refuse(
+        RequestError.invalidParams(undefined, `unknown session ${sessionId}`),
+        "unknown_session",
+      );
+    }
+    const path = session.taskFeed?.outputPathFor(taskId) ?? null;
+    if (path === null) {
+      return refuse(
+        RequestError.invalidParams(undefined, `task ${taskId} has no recorded output`),
+        "no_recorded_output",
+      );
+    }
+    try {
+      const result = await readOutput(path, maxBytes);
+      log("ok", `bytes=${Buffer.byteLength(result.content, "utf8")} truncated=${result.truncated}`);
+      return result;
+    } catch (error) {
+      if (error instanceof OutputUnavailable) {
+        return refuse(
+          RequestError.internalError(
+            undefined,
+            `output of task ${taskId} is no longer available (${error.code})`,
+          ),
+          error.code,
+        );
+      }
+      return refuse(
+        RequestError.internalError(undefined, logValue(errorMessage(error))),
+        "unexpected",
+      );
+    }
   }
 
   /** `_claude/tasks/background`: background the task a foreground tool call
@@ -4546,7 +4632,18 @@ export class ClaudeAcpAgent {
                 // The task settled — no further tool calls can originate
                 // from it, so its registry entry can be dropped.
                 session.liveBackgroundTasks.delete(message.task_id);
-                session.taskFeedPublisher?.notify(session.taskFeed!.onNotification(message));
+                if (session.taskFeed && session.taskFeedPublisher) {
+                  const readable = await endingOutputReadable(
+                    session,
+                    message.task_id,
+                    message.output_file,
+                  );
+                  const change = session.taskFeed.onNotification(message);
+                  if (change === "terminal" && readable !== null) {
+                    session.taskFeed.setTail(message.task_id, null, readable);
+                  }
+                  session.taskFeedPublisher.notify(change);
+                }
                 break;
               case "task_updated":
                 // terminal-status task_updated patch and a (deduplicated)
@@ -4561,7 +4658,20 @@ export class ClaudeAcpAgent {
                 ) {
                   session.liveBackgroundTasks.delete(message.task_id);
                 }
-                session.taskFeedPublisher?.notify(session.taskFeed!.onUpdated(message));
+                if (session.taskFeed && session.taskFeedPublisher) {
+                  // The CLI queues the terminal patch BEFORE the
+                  // task_notification, so this is usually where a shell ends
+                  // and its output check has to happen (story 041, R1.7).
+                  const readable =
+                    normaliseStatus(message.patch.status) !== null
+                      ? await endingOutputReadable(session, message.task_id)
+                      : null;
+                  const change = session.taskFeed.onUpdated(message);
+                  if (change === "terminal" && readable !== null) {
+                    session.taskFeed.setTail(message.task_id, null, readable);
+                  }
+                  session.taskFeedPublisher.notify(change);
+                }
                 break;
               case "worker_shutting_down":
                 // Defer until stream end. The announcement is durable and may be
@@ -5856,6 +5966,9 @@ export class ClaudeAcpAgent {
             }
 
             const acceptedPlanToolUseId = observeExitPlanToolResults(message, content, session);
+            // Before toAcpNotifications, which prunes the tool_use cache entry
+            // that says the result is a Bash call's.
+            observeBackgroundBashResult(message, content, session);
 
             for (const notification of toAcpNotifications(
               content,
@@ -6418,6 +6531,9 @@ export class ClaudeAcpAgent {
    *  query recreate is the one exit that keeps the feed, and does not come
    *  through here. */
   private retireTaskFeed(session: Session): void {
+    // Before the publisher: a tick landing after the flush would publish a
+    // tail into a feed whose session is gone (story 041).
+    session.tailPoller?.dispose();
     const publisher = session.taskFeedPublisher;
     if (!publisher) return;
     publisher.notify(session.taskFeed!.onProcessRestart());
@@ -6431,6 +6547,7 @@ export class ClaudeAcpAgent {
   private createTaskFeed(sessionId: string): {
     taskFeed: TaskFeed;
     taskFeedPublisher: TaskFeedPublisher;
+    tailPoller: TailPoller;
   } {
     const taskFeed = new TaskFeed(
       () => Date.now(),
@@ -6454,7 +6571,15 @@ export class ClaudeAcpAgent {
           )}`,
         ),
     );
-    return { taskFeed, taskFeedPublisher };
+    const tailPoller = new TailPoller(
+      taskFeed,
+      taskFeedPublisher,
+      undefined,
+      undefined,
+      (line) => this.logger.log(line),
+      sessionId,
+    );
+    return { taskFeed, taskFeedPublisher, tailPoller };
   }
 
   /** Cleanly tear down a session: cancel in-flight work, release stream
@@ -11072,6 +11197,11 @@ export function runAcp(logger?: Logger) {
       { parse: parseTasksStopRequest },
       (ctx) => agent.stopTask(ctx.params),
     )
+    .onRequest<TasksOutputRequest, TasksOutputResponse>(
+      TASKS_OUTPUT_METHOD,
+      { parse: parseTasksOutputRequest },
+      (ctx) => agent.taskOutput(ctx.params),
+    )
     .onRequest<TasksBackgroundRequest, TasksBackgroundResponse>(
       TASKS_BACKGROUND_METHOD,
       { parse: parseTasksBackgroundRequest },
@@ -11276,4 +11406,69 @@ function getMatchingModelUsage(modelUsage: Record<string, ModelUsage>, currentMo
     // back to a bare id (rows without `resolvedModel`).
     return { key: bestKey, usage: modelUsage[bestKey] };
   }
+}
+
+/**
+ * Story 041 (R1.1, R1.6): a backgrounded Bash call's result names the file the
+ * CLI writes its output to. When the structured `BashOutput` carries
+ * `backgroundTaskId` and the text names exactly `<that id>.output` by an
+ * absolute path, the path is recorded for the task's tail. Anything else
+ * records nothing, so the task gets no tail. The rendered tool content is not
+ * touched.
+ */
+function observeBackgroundBashResult(
+  message: { type: string; tool_use_result?: unknown },
+  content: unknown,
+  session: Pick<Session, "toolUseCache" | "taskFeed" | "taskFeedPublisher" | "tailPoller">,
+): void {
+  if (message.type !== "user" || !session.taskFeed || !Array.isArray(content)) return;
+  const result = message.tool_use_result;
+  if (typeof result !== "object" || result === null || !("backgroundTaskId" in result)) return;
+  const taskId = result.backgroundTaskId;
+  if (typeof taskId !== "string" || taskId === "") return;
+  const blocks = content.filter(
+    (c): c is { type: "tool_result"; tool_use_id: string; content?: unknown } =>
+      typeof c === "object" && c !== null && c.type === "tool_result",
+  );
+  // `tool_use_result` describes "the" tool_result of its message: only one.
+  if (blocks.length !== 1) return;
+  const [block] = blocks;
+  if (session.toolUseCache[block.tool_use_id]?.name !== "Bash") return;
+  const text =
+    typeof block.content === "string"
+      ? block.content
+      : Array.isArray(block.content)
+        ? block.content
+            .filter(
+              (c): c is { type: "text"; text: string } =>
+                typeof c === "object" &&
+                c !== null &&
+                c.type === "text" &&
+                typeof c.text === "string",
+            )
+            .map((c) => c.text)
+            .join("\n")
+        : "";
+  const path = outputPathFromBashResult(text, taskId);
+  if (path === null) return;
+  session.taskFeedPublisher?.notify(session.taskFeed.onOutputPath(taskId, path));
+  session.tailPoller?.kick();
+}
+
+/**
+ * Story 041 (R1.7): whether an ending shell task's output file reads, checked
+ * BEFORE the ending is folded into the feed — once the feed holds the ending,
+ * any publish (a throttled trailer, a poller tick) could send it while the
+ * check is still pending, and with `hasOutput: false`. Returns null without
+ * awaiting anything when there is no file to check, so every other ending
+ * keeps its synchronous place in the SDK message loop.
+ */
+async function endingOutputReadable(
+  session: Pick<Session, "taskFeed" | "tailPoller">,
+  taskId: string,
+  outputFile?: string,
+): Promise<boolean | null> {
+  const path = session.taskFeed?.endingOutputPath(taskId, outputFile) ?? null;
+  if (path === null || !session.tailPoller) return null;
+  return session.tailPoller.checkOutput(path);
 }

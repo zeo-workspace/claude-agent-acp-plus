@@ -27,17 +27,32 @@
  *
  * Neither class ever copies a command line (`SDKTaskStartedMessage.prompt`)
  * into an entry or a log line.
+ *
+ * Version 2 (story 041) adds `hasOutput` and `tail`. A shell task's output
+ * path — named by the Bash result while it runs, by `task_notification` when
+ * it ends — is kept beside the table, never on the wire. Once an ended shell
+ * task leaves the table, its path moves to a bounded registry so
+ * `_claude/tasks/output` can still serve it.
  */
 
+import { stat } from "node:fs/promises";
 import type {
   SDKTaskNotificationMessage,
   SDKTaskProgressMessage,
   SDKTaskStartedMessage,
   SDKTaskUpdatedMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { readTail } from "./task-output.js";
 
 /** The `session_info_update._meta` key the snapshot is published under. */
 export const TASKS_META_KEY = "_claude/tasks";
+
+/** The `_claude/tasks` contract version advertised at `initialize`. Version 2
+ *  adds `hasOutput`, `tail` and `_claude/tasks/output`. */
+export const TASKS_CONTRACT_VERSION = 2;
+
+/** Ended shell outputs still servable per session, most recent kept. */
+export const ENDED_OUTPUTS_MAX = 256;
 
 export type TaskStatus = "running" | "completed" | "failed" | "stopped" | "interrupted";
 
@@ -57,6 +72,10 @@ export type TaskEntry = {
   usage: TaskUsage | null;
   lastTool: string | null;
   summary: string | null;
+  /** True when `_claude/tasks/output` can serve this task (version 2). */
+  hasOutput: boolean;
+  /** A running shell's last lines, sanitized; null otherwise (version 2). */
+  tail: string[] | null;
 };
 
 export type TasksSnapshot = { tasks: TaskEntry[] };
@@ -152,6 +171,10 @@ export class TaskFeed {
   private readonly held = new Map<string, TaskEntry>();
   /** Shell task ids labelled by their tool call: a patch never relabels them. */
   private readonly toolDescribed = new Set<string>();
+  /** Shell task id → its output file, while the task is in the table. */
+  private readonly outputs = new Map<string, string>();
+  /** Ended shell outputs that left the table, oldest first; see `ENDED_OUTPUTS_MAX`. */
+  private readonly endedOutputs = new Map<string, string>();
 
   constructor(
     private readonly clock: () => number,
@@ -189,6 +212,8 @@ export class TaskFeed {
       usage: null,
       lastTool: null,
       summary: null,
+      hasOutput: false,
+      tail: null,
     };
     if (shell && msg.is_backgrounded !== true) {
       this.held.set(msg.task_id, entry);
@@ -242,6 +267,7 @@ export class TaskFeed {
       } else {
         if (normaliseStatus(msg.patch.status)) {
           this.held.delete(msg.task_id);
+          this.outputs.delete(msg.task_id);
         } else {
           this.patch(heldEntry, msg.patch);
         }
@@ -261,11 +287,17 @@ export class TaskFeed {
 
   onNotification(msg: SDKTaskNotificationMessage): TaskChange {
     // A held shell task that ends was never shown: its ending is not news.
-    if (this.held.delete(msg.task_id)) return "none";
+    if (this.held.delete(msg.task_id)) {
+      this.outputs.delete(msg.task_id);
+      return "none";
+    }
     const task = this.running(msg.task_id, "task_notification");
     if (!task) return "none";
     const ending = normaliseStatus(msg.status, msg.reason) ?? "completed";
     if (msg.summary) task.summary = msg.summary;
+    if (task.type === "shell" && typeof msg.output_file === "string" && msg.output_file !== "") {
+      this.outputs.set(task.id, msg.output_file);
+    }
     const usage = usageOf(msg.usage);
     if (usage) task.usage = usage;
     this.end(task, ending);
@@ -316,6 +348,7 @@ export class TaskFeed {
   /** The CLI process restarted: whatever was running did not survive it. A
    *  held shell task was never shown, so it is dropped rather than ended. */
   onProcessRestart(): TaskChange {
+    for (const id of this.held.keys()) this.outputs.delete(id);
     this.held.clear();
     let change: TaskChange = "none";
     for (const task of this.tasks.values()) {
@@ -324,6 +357,70 @@ export class TaskFeed {
       change = "terminal";
     }
     return change;
+  }
+
+  /**
+   * Records the output file a Bash result named for a known shell task. Any
+   * other task, or an unknown id, is ignored: only a shell writes an output
+   * file, and only one the adapter recorded is ever read (R2.5).
+   */
+  onOutputPath(taskId: string, path: string): TaskChange {
+    const task = this.tasks.get(taskId) ?? this.held.get(taskId);
+    if (!task || task.type !== "shell" || task.status !== "running") {
+      this.log.debug?.(
+        `[tasks/feed] sessionId=${this.sessionId} taskId=${taskId} ignored=output_path`,
+      );
+      return "none";
+    }
+    this.outputs.set(taskId, path);
+    return "progress";
+  }
+
+  /**
+   * Sets a shell task's tail and whether its output reads. A running task
+   * keeps `lines`; an ended one keeps none, so this only confirms its output.
+   * Returns `"none"` when nothing changed, so an idle file publishes nothing.
+   */
+  setTail(taskId: string, lines: string[] | null, readable: boolean): TaskChange {
+    const task = this.tasks.get(taskId);
+    if (!task || task.type !== "shell") return "none";
+    // An ended task's output is decided by the ending's check alone: a poller
+    // tick that started before the ending and failed after it must not undo it.
+    if (task.status !== "running" && !readable) return "none";
+    const tail = task.status === "running" && readable ? lines : null;
+    if (task.hasOutput === readable && sameLines(task.tail, tail)) return "none";
+    task.hasOutput = readable;
+    task.tail = tail === null ? null : [...tail];
+    return "progress";
+  }
+
+  /**
+   * The file the ending's existence check reads (R1.7), or null when there is
+   * nothing to check: `taskId` must be a running shell in the table. A non-empty
+   * `output_file` from the ending (the CLI's own) wins over the path the Bash result named.
+   * The caller checks BEFORE folding the ending in, so the snapshot that
+   * carries the ending already says whether the output can be served.
+   */
+  endingOutputPath(taskId: string, outputFile?: string): string | null {
+    const task = this.tasks.get(taskId);
+    if (!task || task.type !== "shell" || task.status !== "running") return null;
+    if (typeof outputFile === "string" && outputFile !== "") return outputFile;
+    return this.outputs.get(taskId) ?? null;
+  }
+
+  /** Running shell tasks with a recorded output file: the tail poller's work. */
+  runningOutputs(): { taskId: string; path: string }[] {
+    const work: { taskId: string; path: string }[] = [];
+    for (const [taskId, path] of this.outputs) {
+      const task = this.tasks.get(taskId);
+      if (task?.status === "running" && task.type === "shell") work.push({ taskId, path });
+    }
+    return work;
+  }
+
+  /** The output file `_claude/tasks/output` may read for `taskId`, or null. */
+  outputPathFor(taskId: string): string | null {
+    return this.outputs.get(taskId) ?? this.endedOutputs.get(taskId) ?? null;
   }
 
   /** True when the feed holds `taskId` as running — the stop request's gate. */
@@ -337,7 +434,11 @@ export class TaskFeed {
     const tasks = [...this.tasks.values()]
       .filter((t) => t.status === "running" || !this.published.has(t.id))
       .sort((a, b) => a.startedAt - b.startedAt)
-      .map((t) => ({ ...t, usage: t.usage ? { ...t.usage } : null }));
+      .map((t) => ({
+        ...t,
+        usage: t.usage ? { ...t.usage } : null,
+        tail: t.tail ? [...t.tail] : null,
+      }));
     const endedIds = tasks.filter((t) => t.status !== "running").map((t) => t.id);
     for (const id of endedIds) this.snapshotLives.set(id, this.lives.get(id) ?? 0);
     return { snapshot: { tasks }, endedIds };
@@ -354,6 +455,7 @@ export class TaskFeed {
       this.snapshotLives.delete(id);
       this.published.add(id);
       this.tasks.delete(id);
+      this.retireOutput(id);
     }
   }
 
@@ -372,6 +474,12 @@ export class TaskFeed {
    *  state supersedes an ending the client has not seen yet, and a published
    *  id must be shown again. */
   private admit(entry: TaskEntry): void {
+    // A new life writes a new file: the previous life's is not this one's. A
+    // held shell being promoted is the same life, and keeps the path it has.
+    if (this.tasks.has(entry.id) || this.published.has(entry.id)) {
+      this.outputs.delete(entry.id);
+      this.endedOutputs.delete(entry.id);
+    }
     this.published.delete(entry.id);
     this.lives.set(entry.id, (this.lives.get(entry.id) ?? 0) + 1);
     this.tasks.set(entry.id, entry);
@@ -389,8 +497,31 @@ export class TaskFeed {
   private end(task: TaskEntry, status: Exclude<TaskStatus, "running">, at = this.clock()): void {
     task.status = status;
     task.endedAt = at;
+    // An ended task has no tail, and its output is claimed again only once the
+    // file was checked (R1.7).
+    task.tail = null;
+    task.hasOutput = false;
     this.deadlines.delete(task.id);
   }
+
+  /** Moves a task that left the table to the ended registry, newest last. */
+  private retireOutput(taskId: string): void {
+    const path = this.outputs.get(taskId);
+    this.outputs.delete(taskId);
+    if (path === undefined) return;
+    this.endedOutputs.delete(taskId);
+    this.endedOutputs.set(taskId, path);
+    while (this.endedOutputs.size > ENDED_OUTPUTS_MAX) {
+      const oldest = this.endedOutputs.keys().next().value;
+      if (oldest === undefined) break;
+      this.endedOutputs.delete(oldest);
+    }
+  }
+}
+
+function sameLines(a: string[] | null, b: string[] | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.length === b.length && a.every((line, i) => line === b[i]);
 }
 
 export type PublisherTimers = {
@@ -569,5 +700,145 @@ export class TaskFeedPublisher {
       },
       Math.max(0, at - this.timers.now()),
     );
+  }
+}
+
+/** The longest the ending's existence check may hold the SDK message loop. */
+export const ENDING_CHECK_TIMEOUT_MS = 2_000;
+
+/** How often the tail poller looks at running shells' output files (R1.4). */
+export const TAIL_POLL_INTERVAL_MS = 1_000;
+
+export type PollerTimers = {
+  setInterval: (fn: () => void, ms: number) => unknown;
+  clearInterval: (handle: any) => void;
+};
+
+const realPollerTimers: PollerTimers = {
+  setInterval: (fn, ms) => setInterval(fn, ms),
+  clearInterval: (handle) => clearInterval(handle),
+};
+
+/** A log field value with no whitespace or `=` to forge a second field. */
+function field(value: string): string {
+  return value.replace(/[\s=]+/g, "_");
+}
+
+function codeOf(error: unknown): string {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+    ? error.code
+    : "unknown";
+}
+
+/**
+ * Publishes a running shell task's tail (story 041, R1.4, R1.5). One interval
+ * while any shell output is known; each tick `stat`s every file and reads the
+ * tail only when its size changed, shrinking included. A read error publishes
+ * `tail: null, hasOutput: false` and logs once per task until the file reads
+ * again. A tick never overlaps the previous one, and no rejection escapes it:
+ * the interval runs outside every caller that could handle one, and Node exits
+ * on an unhandled rejection.
+ */
+export class TailPoller {
+  private interval: unknown = null;
+  private busy = false;
+  private closed = false;
+  /** task id → the file size the last published tail was read at. */
+  private readonly sizes = new Map<string, number>();
+  /** Task ids whose file failed to read: logged once, until it reads again. */
+  private readonly failing = new Set<string>();
+
+  constructor(
+    private readonly feed: TaskFeed,
+    private readonly publisher: TaskFeedPublisher,
+    private readonly timers: PollerTimers = realPollerTimers,
+    private readonly readTailFn: (path: string) => Promise<string[]> = readTail,
+    private readonly log: (line: string) => void = () => {},
+    private readonly sessionId = "",
+  ) {}
+
+  /** Arms the interval when there is output to watch. Called after a path is recorded. */
+  kick(): void {
+    if (this.closed || this.interval !== null) return;
+    if (this.feed.runningOutputs().length === 0) return;
+    this.interval = this.timers.setInterval(() => void this.tick(), TAIL_POLL_INTERVAL_MS);
+  }
+
+  /**
+   * The ending's existence check (R1.7): true when `path` reads as a regular
+   * file within `ENDING_CHECK_TIMEOUT_MS`. Never rejects.
+   */
+  async checkOutput(path: string): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), ENDING_CHECK_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([
+        this.readTailFn(path).then(
+          () => true,
+          () => false,
+        ),
+        timeout,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  dispose(): void {
+    this.closed = true;
+    this.stop();
+  }
+
+  private stop(): void {
+    if (this.interval !== null) this.timers.clearInterval(this.interval);
+    this.interval = null;
+  }
+
+  private async tick(): Promise<void> {
+    if (this.busy || this.closed) return;
+    this.busy = true;
+    try {
+      const work = this.feed.runningOutputs();
+      if (work.length === 0) {
+        this.stop();
+        this.sizes.clear();
+        this.failing.clear();
+        return;
+      }
+      for (const { taskId, path } of work) {
+        if (this.closed) return;
+        let lines: string[] | null = null;
+        let readable = false;
+        try {
+          const size = (await stat(path)).size;
+          if (this.sizes.get(taskId) === size) continue;
+          lines = await this.readTailFn(path);
+          this.sizes.set(taskId, size);
+          this.failing.delete(taskId);
+          readable = true;
+        } catch (error) {
+          this.sizes.delete(taskId);
+          if (!this.failing.has(taskId)) {
+            this.failing.add(taskId);
+            this.log(
+              `[tasks/tail] level=warn sessionId=${field(this.sessionId)} taskId=${field(taskId)} code=${field(codeOf(error))}`,
+            );
+          }
+        }
+        if (this.closed) return;
+        this.publisher.notify(this.feed.setTail(taskId, lines, readable));
+      }
+    } catch (error) {
+      this.log(
+        `[tasks/tail] level=warn sessionId=${field(this.sessionId)} outcome=tick_failed code=${field(codeOf(error))}`,
+      );
+    } finally {
+      this.busy = false;
+    }
   }
 }

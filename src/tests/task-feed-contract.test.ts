@@ -5,6 +5,13 @@
 // parses a byte-identical copy. This test proves the adapter's TaskFeed
 // produces exactly that document from SDK messages, so the fixture can never
 // describe a shape the producer does not emit.
+//
+// Version 2 (story 041): `fixtures/claude-tasks-snapshot.json` is now the
+// version 2 document, proved against TaskFeed by `task-feed-v2.test.ts`. The
+// version 1 document lives on as `fixtures/claude-tasks-snapshot-v1.json`, the
+// twin of patch 0034's Zed copy. Version 1 messages alone produce exactly that
+// document plus `hasOutput: false` and `tail: null` on every task: nothing
+// confirmed an output, and no tail was read.
 
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
@@ -14,13 +21,19 @@ import { TaskFeed } from "../task-feed.js";
 const SESSION = "contract-session";
 const base = () => ({ type: "system", uuid: randomUUID(), session_id: SESSION });
 
-async function fixture() {
-  const url = new URL("./fixtures/claude-tasks-snapshot.json", import.meta.url);
+async function fixture(name = "claude-tasks-snapshot.json") {
+  const url = new URL(`./fixtures/${name}`, import.meta.url);
   return JSON.parse(await readFile(url, "utf8"));
 }
 
+/** The version 1 fixture, as a version 2 feed publishes it from v1 messages. */
+async function v1FixtureAsV2() {
+  const doc = await fixture("claude-tasks-snapshot-v1.json");
+  return { tasks: doc.tasks.map((t: object) => ({ ...t, hasOutput: false, tail: null })) };
+}
+
 describe("_claude/tasks snapshot contract", () => {
-  it("TaskFeed produces exactly the shared fixture", async () => {
+  it("TaskFeed produces exactly the version 1 fixture, plus the two version 2 fields", async () => {
     let now = 0;
     const feed = new TaskFeed(() => now);
 
@@ -85,7 +98,7 @@ describe("_claude/tasks snapshot contract", () => {
 
     // Round-trip through JSON: the wire carries the serialised form.
     const { snapshot, endedIds } = feed.snapshot();
-    expect(JSON.parse(JSON.stringify(snapshot))).toEqual(await fixture());
+    expect(JSON.parse(JSON.stringify(snapshot))).toEqual(await v1FixtureAsV2());
     expect(endedIds).toEqual(["c9d1e2f3g"]);
   });
 
@@ -104,10 +117,14 @@ describe("_claude/tasks snapshot contract", () => {
       "type",
       "usage",
     ];
+    const v1 = await fixture("claude-tasks-snapshot-v1.json");
+    expect(Object.keys(v1)).toEqual(["tasks"]);
+    for (const task of v1.tasks) expect(Object.keys(task).sort()).toEqual(keys);
+    const v2Keys = [...keys, "hasOutput", "tail"].sort();
     const doc = await fixture();
     expect(Object.keys(doc)).toEqual(["tasks"]);
     for (const task of doc.tasks) {
-      expect(Object.keys(task).sort()).toEqual(keys);
+      expect(Object.keys(task).sort()).toEqual(v2Keys);
       expect(["running", "completed", "failed", "stopped", "interrupted"]).toContain(task.status);
       if (task.usage !== null) {
         expect(Object.keys(task.usage).sort()).toEqual(["durationMs", "tokens", "toolUses"]);
