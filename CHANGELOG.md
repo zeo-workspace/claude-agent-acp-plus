@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.26.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.25.3...v0.26.0) (2026-10-12)
+
+
+### Features
+
+* **041:** add the task output reader and the version 2 fixtures ([27ee8fc](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/27ee8fc0e2ada6437fa207224b364930c0d8d861))
+* **041:** publish a running shell's tail and serve task output over _claude/tasks v2 ([26ea289](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/26ea2891426d864eff0319f8ff3ef9eeed5b4511))
+
+
+### Bug Fixes
+
+* **041:** drop the background notice's trailing period from the output path ([f39da15](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/f39da159ce2c29461e48982a8d5af8ff4669039d))
+
+
+### Documentation
+
+* **041:** document _claude/tasks v2 and release the adapter ([81324bf](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/81324bf42b826ea17ca14d0315ce6af8001df4f9))
+
 ## [0.25.3](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.25.2...v0.25.3) (2026-10-08)
 
 
