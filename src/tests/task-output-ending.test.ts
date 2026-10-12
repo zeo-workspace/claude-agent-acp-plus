@@ -18,7 +18,12 @@ import { randomUUID } from "crypto";
 import type { SessionNotification } from "@agentclientprotocol/sdk";
 import { AcpClient, ClaudeAcpAgent, TASKS_META_KEY } from "../acp-agent.js";
 import { FOREGROUND_SHELL_HOLD_MS, TailPoller, TaskFeed, TaskFeedPublisher } from "../task-feed.js";
-import { OutputUnavailable, readOutput, readTail } from "../task-output.js";
+import {
+  OutputUnavailable,
+  outputPathFromBashResult,
+  readOutput,
+  readTail,
+} from "../task-output.js";
 import {
   idle,
   lastScriptedQuery,
@@ -220,5 +225,16 @@ describe("a stale poller read after the ending", () => {
     expect(feed.setTail("b1", null, false)).toBe("none");
     const b1 = feed.snapshot().snapshot.tasks.find((t) => t.id === "b1");
     expect(b1).toMatchObject({ status: "completed", hasOutput: true, tail: null });
+  });
+});
+
+describe("the CLI's real background notice (3.1, CLI 2.1.285)", () => {
+  it("ends with a period that is not part of the path", () => {
+    const path = "/tmp/claude-1000/-tmp-x/dff6db10/tasks/b0dtugkyb.output";
+    const notice = `Command running in background with ID: b0dtugkyb. Output is being written to: ${path}.`;
+    expect(outputPathFromBashResult(notice, "b0dtugkyb")).toBe(path);
+    expect(outputPathFromBashResult(`${notice}\nMore text.`, "b0dtugkyb")).toBe(path);
+    // Converse: the period never makes another task's file acceptable.
+    expect(outputPathFromBashResult(notice, "b0dtugky")).toBeNull();
   });
 });

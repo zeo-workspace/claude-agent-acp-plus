@@ -128,7 +128,9 @@ export function sanitizeLine(line: string): string {
   return chars.slice(0, TAIL_MAX_CHARS - 1).join("") + "…";
 }
 
-const OUTPUT_NOTICE = /Output is being written to: (\S+)/;
+// The CLI ends the sentence with a period (2.1.285: "…/tasks/<id>.output."), so
+// one trailing punctuation mark is not part of the path.
+const OUTPUT_NOTICE = /Output is being written to: (\S+?)[.,;:]?(?:\s|$)/;
 
 /**
  * The output path a Bash result names for `taskId`, or null. Only an absolute, normalized path
