@@ -76,24 +76,37 @@ back in `auto`. A deny rule always wins over a grant.
 
 The agent's background shells, subagents, monitors and workflows are published as one table per
 session, under `session_info_update._meta["_claude/tasks"]`. The `initialize` response advertises
-it as `agentCapabilities._meta["_claude/tasks"] = { "version": 1 }`; clients should gate on that
-capability, never on the agent's name.
+it as `agentCapabilities._meta["_claude/tasks"] = { "version": 2 }`; clients should gate on that
+capability, never on the agent's name. Version 2 added `hasOutput`, `tail` and
+`_claude/tasks/output`; a client that reads only version 1 fields keeps working.
 
 Each update is a **snapshot, not a delta**: `{ "tasks": [...] }` carries every live task, so a
 client replaces its list instead of merging. Each entry has `id`, `toolCallId`, `type`
 (`shell` · `subagent` · …), `description`, `background`, `depth`, `status`
 (`running` · `completed` · `failed` · `stopped` · `interrupted`), `startedAt` and `endedAt`
 (epoch milliseconds, `endedAt` null while running), `usage` (`{ tokens, toolUses, durationMs }`
-or null), `lastTool` and `summary`. An ended task appears in exactly one snapshot with its final
+or null), `lastTool`, `summary`, `hasOutput` and `tail`. An ended task appears in exactly one snapshot with its final
 status, then drops out. Progress is published at most once per second; an ending is published at
 once. When the agent's stream ends, running tasks are published once as `interrupted`.
 Command lines are never copied into an entry.
 
-Two JSON-RPC methods act on a task:
+`hasOutput` is true when the task's output file can be read through `_claude/tasks/output`
+(shell tasks only). `tail` holds the last 10 lines of a **running** shell's output, refreshed about
+once a second, each line stripped of terminal escapes and control characters and cut to 240
+characters (a cut line ends in `…`); it is null for every other task and once the task ends.
+
+Three JSON-RPC methods act on a task:
 
 - `_claude/tasks/stop` — params `{ sessionId, taskId }`, result `{}`
 - `_claude/tasks/background` — params `{ sessionId, toolCallId }`, result `{ backgrounded }`;
   moves a foreground tool call's task to the background
+- `_claude/tasks/output` — params `{ sessionId, taskId, maxBytes }`, result
+  `{ content, totalBytes, truncated }`; the last `min(maxBytes, 1 MiB)` bytes of a shell task's
+  output, starting at a line boundary when truncated. It serves only the file the feed recorded
+  for that task, also after the task ended (the last 256 ended outputs per session are kept) and
+  after the session's stream ended. A task with no recorded output is invalid-params (`-32602`);
+  a file that is gone or no longer a regular file is an internal error (`-32603`). Its log line
+  names the session, task and byte count, never the content.
 
 An unknown session or a task that is not running is an invalid-params error (`-32602`); a session
 whose stream already ended is an internal error (`-32603`).
