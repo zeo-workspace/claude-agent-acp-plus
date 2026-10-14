@@ -1,3 +1,6 @@
+# Version updates stopped running when this repository moved from lucascouts to the
+# zeo-workspace organization on 2026-10-01; the last scheduled job ran that day. A push
+# touching this file re-registers the configuration, so this comment is that push.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
