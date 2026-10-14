@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.30.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.29.0...v0.30.0) (2026-10-14)
+
+
+### Features
+
+* **deps:** bump claude-agent-sdk to 0.3.296 and the ACP SDK to 1.8.0 ([281cefd](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/281cefde52b91744d159d50e56634a6d06b8525f))
+
+
+### Miscellaneous Chores
+
+* **deps:** apply the minor group of Dependabot [#162](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/162) ([0802d7e](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/0802d7e660223ad0d5bb7cb1a2686e18fbb02634))
+* **deps:** bump @babel/runtime from 7.29.7 to 7.29.10 ([8afe7ce](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/8afe7cef881a0fd44723b2f4475b47e78bc19381))
+* **deps:** bump the actions group with 3 updates ([997d781](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/997d7817a7a1e5194a36fd615ca305f71921b120))
+
 ## [0.29.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.28.0...v0.29.0) (2026-10-14)
 
 
