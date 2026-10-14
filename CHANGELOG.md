@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.29.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.28.0...v0.29.0) (2026-10-14)
+
+
+### Features
+
+* **usage:** render the report's usage patterns in /usage ([c2a0a02](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/c2a0a02cac019c8b405ed19e5f43d98422361b5b))
+
+
+### Bug Fixes
+
+* **bash:** keep a background command's terminal running and report real exit codes ([03b893b](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/03b893b6208e9f5d23bb5b4fc3819b20000b62e1))
+* **context:** ask for the summary context usage on the background refresh ([6eb305b](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/6eb305b84002def01f106b75c08cd4cb534ed739))
+* **prompt:** answer a held turn whose subagent's task_notification is lost ([a7ada26](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/a7ada26a574ad254b5c03c21246fe3fd8daf0d15))
+* **tools:** never resolve a tool input path that is not a string ([3eb21ad](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/3eb21adcdebc8ea814bf52c6a14b830ef47fdd01))
+
+
+### Continuous Integration
+
+* **dependabot:** re-register version updates after the org transfer ([2f2661a](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/2f2661ac27887bab25abad293eb928d3b9aaca0e))
+
 ## [0.28.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.27.0...v0.28.0) (2026-10-14)
 
 
