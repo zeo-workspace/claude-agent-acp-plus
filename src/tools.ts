@@ -120,6 +120,9 @@ interface ToolUpdate {
  * Returns the original path if it's outside the project directory or if no cwd is provided.
  */
 export function toDisplayPath(filePath: string, cwd?: string): string {
+  // `path.resolve` throws on a non-string (upstream issue #1308); the type says
+  // string, but the value is a model's tool input.
+  if (typeof filePath !== "string") return displayValueOf(filePath) ?? "";
   if (!cwd) return filePath;
   const resolvedCwd = path.resolve(cwd);
   const resolvedFile = path.resolve(filePath);
@@ -127,6 +130,32 @@ export function toDisplayPath(filePath: string, cwd?: string): string {
     return path.relative(resolvedCwd, resolvedFile);
   }
   return filePath;
+}
+
+/** A tool input's path, when it is one: a non-empty string. Anything else — a
+ *  model can emit `{"file_path": 12345}`, which Claude Code rejects — is no
+ *  path, so it is neither resolved nor sent as a location or a diff target
+ *  (parity item 104, upstream issue #1308). */
+function pathOf(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** How a tool input value that is not a path still shows in a title: a number
+ *  or boolean as its text, so the failed call names what the model sent;
+ *  anything else (an object, null) as nothing. */
+function displayValueOf(value: unknown): string | undefined {
+  if (typeof value === "string") return value.length > 0 ? value : undefined;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  return undefined;
+}
+
+/** The title form of a tool input's path: project-relative when it is a path
+ *  under `cwd`, the value's text when it is a scalar that is not a path. */
+function displayPathOf(value: unknown, cwd?: string): string | undefined {
+  const filePath = pathOf(value);
+  return filePath !== undefined ? toDisplayPath(filePath, cwd) : displayValueOf(value);
 }
 
 /** Read a Write tool_use input the way the CLI validates it. Since 2.1.280 the
@@ -195,15 +224,16 @@ export function toolInfoFromToolUse(
       } else if (input?.offset) {
         limit = " (from line " + input.offset + ")";
       }
-      const displayPath = input?.file_path ? toDisplayPath(input.file_path, cwd) : "File";
+      const filePath = pathOf(input?.file_path);
+      const displayPath = displayPathOf(input?.file_path, cwd) ?? "File";
       return {
         title: "Read " + displayPath + limit,
         kind: "read",
-        locations: input?.file_path
+        locations: filePath
           ? [
               {
-                path: input.file_path,
-                line: input.offset ?? 1,
+                path: filePath,
+                line: input?.offset ?? 1,
               },
             ]
           : [],
@@ -213,12 +243,13 @@ export function toolInfoFromToolUse(
 
     case "Write": {
       const input = normalizeWriteInput(toolUse.input);
+      const filePath = pathOf(input?.file_path);
       let content: ToolCallContent[] = [];
-      if (input && input.file_path) {
+      if (input && filePath) {
         content = [
           {
             type: "diff",
-            path: input.file_path,
+            path: filePath,
             oldText: null,
             newText: input.content,
           },
@@ -231,39 +262,41 @@ export function toolInfoFromToolUse(
           },
         ];
       }
-      const displayPath = input?.file_path ? toDisplayPath(input.file_path, cwd) : undefined;
+      const displayPath = displayPathOf(input?.file_path, cwd);
       return {
         title: displayPath ? `Write ${displayPath}` : "Preparing file…",
         kind: "edit",
         content,
-        locations: input?.file_path ? [{ path: input.file_path }] : [],
+        locations: filePath ? [{ path: filePath }] : [],
       };
     }
 
     case "Edit": {
       const input = toolUse.input as FileEditInput | undefined;
+      const filePath = pathOf(input?.file_path);
       let content: ToolCallContent[] = [];
-      if (input && input.file_path && (input.old_string || input.new_string)) {
+      if (input && filePath && (input.old_string || input.new_string)) {
         content = [
           {
             type: "diff",
-            path: input.file_path,
+            path: filePath,
             oldText: input.old_string || null,
             newText: input.new_string ?? "",
           },
         ];
       }
-      const displayPath = input?.file_path ? toDisplayPath(input.file_path, cwd) : undefined;
+      const displayPath = displayPathOf(input?.file_path, cwd);
       return {
         title: displayPath ? `Edit ${displayPath}` : "Edit",
         kind: "edit",
         content,
-        locations: input?.file_path ? [{ path: input.file_path }] : [],
+        locations: filePath ? [{ path: filePath }] : [],
       };
     }
 
     case "Glob": {
       const input = toolUse.input as GlobInput | undefined;
+      const globPath = pathOf(input?.path);
       let label = "Find";
       if (input?.path) {
         label += ` \`${input.path}\``;
@@ -275,7 +308,7 @@ export function toolInfoFromToolUse(
         title: label,
         kind: "search",
         content: [],
-        locations: input?.path ? [{ path: input.path }] : [],
+        locations: globPath ? [{ path: globPath }] : [],
       };
     }
 

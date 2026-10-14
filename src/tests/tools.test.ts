@@ -1744,6 +1744,68 @@ describe("toolInfoFromToolUse - Write input aliases", () => {
   });
 });
 
+// Parity item 104 (upstream issue #1308, open): a model can emit a schema-invalid
+// path. Claude Code rejects the call, but `path.resolve(12345)` threw while the
+// adapter formatted the title, which failed the whole ACP prompt.
+describe("toolInfoFromToolUse - non-string paths (item 104)", () => {
+  const cwd = "/home/user/project";
+
+  it("Read with a numeric file_path neither throws nor reports a location", () => {
+    const info = toolInfoFromToolUse(
+      { name: "Read", id: "toolu_read_num", input: { file_path: 12345 } },
+      false,
+      cwd,
+    );
+    expect(info.title).toBe("Read 12345");
+    expect(info.locations).toEqual([]);
+  });
+
+  it("Write with a numeric file_path neither throws nor offers a diff to a path", () => {
+    const info = toolInfoFromToolUse(
+      { name: "Write", id: "toolu_write_num", input: { file_path: 7, content: "x" } },
+      false,
+      cwd,
+    );
+    expect(info.title).toBe("Write 7");
+    expect(info.locations).toEqual([]);
+    expect(info.content).toEqual([{ type: "content", content: { type: "text", text: "x" } }]);
+  });
+
+  it("Edit with a numeric file_path neither throws nor offers a diff to a path", () => {
+    const info = toolInfoFromToolUse(
+      {
+        name: "Edit",
+        id: "toolu_edit_num",
+        input: { file_path: 7, old_string: "a", new_string: "b" },
+      },
+      false,
+      cwd,
+    );
+    expect(info.title).toBe("Edit 7");
+    expect(info.locations).toEqual([]);
+    expect(info.content).toEqual([]);
+  });
+
+  it("an object path is omitted rather than rendered as [object Object]", () => {
+    const info = toolInfoFromToolUse(
+      { name: "Read", id: "toolu_read_obj", input: { file_path: { a: 1 } } },
+      false,
+      cwd,
+    );
+    expect(info.title).toBe("Read File");
+    expect(info.locations).toEqual([]);
+  });
+
+  it("Glob with a numeric path reports no location", () => {
+    const info = toolInfoFromToolUse(
+      { name: "Glob", id: "toolu_glob_num", input: { path: 3, pattern: "*.ts" } },
+      false,
+      cwd,
+    );
+    expect(info.locations).toEqual([]);
+  });
+});
+
 describe("toolInfoFromToolUse - undefined input regression", () => {
   it("Read with undefined input should not throw", () => {
     const toolUse = { name: "Read", id: "toolu_read_undef", input: undefined };
