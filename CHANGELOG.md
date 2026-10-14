@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.28.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.27.0...v0.28.0) (2026-10-14)
+
+
+### Features
+
+* **ultracode:** make Ultracode an independent boolean session option ([6e5ec98](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/6e5ec9887f92d7b18291705c5c6a22bef6d1f915))
+
+
+### Bug Fixes
+
+* **prompt:** settle a prompt folded into an autonomous cycle ([f56db45](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/f56db452916394f20cdf46e29171a2db0b7153af))
+
 ## [0.27.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.26.0...v0.27.0) (2026-10-14)
 
 
