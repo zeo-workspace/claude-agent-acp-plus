@@ -431,6 +431,33 @@ export type TasksOutputResponse = { content: string; totalBytes: number; truncat
 export type TasksBackgroundRequest = { sessionId: string; toolCallId: string };
 export type TasksBackgroundResponse = { backgrounded: boolean };
 
+/** Refresh the account quota windows of one session now, on demand. Params
+ *  {@link UsageRefreshRequest}, result {@link UsageRefreshResponse}. The windows
+ *  themselves arrive the way they always do — one `usage_update` per window,
+ *  carrying `_meta["_claude/rateLimit"]` — before the response does. */
+export const USAGE_REFRESH_METHOD = "_claude/usage/refresh";
+/** `agentCapabilities._meta` key advertising {@link USAGE_REFRESH_METHOD}. A
+ *  client gates on this, never on the agent's name (see
+ *  {@link TASKS_CAPABILITY_KEY}). */
+export const USAGE_CAPABILITY_KEY = "_claude/usage";
+export const USAGE_CAPABILITY_VERSION = 1;
+
+/** How old a shared quota sample may be and still answer an on-demand refresh.
+ *
+ *  The client asks on every hover of the context ring, so this is the knob that
+ *  trades freshness against cost. Five seconds is shorter than any change a
+ *  person reading a tooltip could tell apart — neither the five-hour nor the
+ *  weekly window moves measurably in that time — yet long enough that a burst
+ *  of hovers, or several Zeo windows hovered in turn, costs one control request
+ *  between them rather than one each. Much shorter than the idle poll's
+ *  {@link sharedSampleMaxAgeMs}: a hover is someone asking "what is it NOW?",
+ *  and a sample most of an interval old is exactly what the poll already
+ *  showed them. */
+export const USAGE_REFRESH_MAX_SAMPLE_AGE_MS = 5_000;
+
+export type UsageRefreshRequest = { sessionId: string };
+export type UsageRefreshResponse = { refreshed: boolean };
+
 /** The SDK's own text for a rejected control request, passed through to the
  *  client as the internal error's message (R2.4). */
 function errorMessage(error: unknown): string {
@@ -483,6 +510,11 @@ export function parseTasksBackgroundRequest(params: unknown): TasksBackgroundReq
     sessionId: requireIdField(params, TASKS_BACKGROUND_METHOD, "sessionId"),
     toolCallId: requireIdField(params, TASKS_BACKGROUND_METHOD, "toolCallId"),
   };
+}
+
+/** Validate raw JSON-RPC params into a {@link UsageRefreshRequest}. */
+export function parseUsageRefreshRequest(params: unknown): UsageRefreshRequest {
+  return { sessionId: requireIdField(params, USAGE_REFRESH_METHOD, "sessionId") };
 }
 
 /** Internal model-selection state. Mirrors the shape the ACP SDK exposed as
@@ -659,10 +691,17 @@ type Turn = {
  *  the old utilization, and the bar is wrong in the one direction that matters
  *  (it under-reports how much is available) until the next turn ends.
  *
+ *  Thirty seconds by default (sixty until the quota tooltip): the tooltip over
+ *  the context ring shows these windows as numbers, so a reading up to a minute
+ *  old was visible as one. The cost does not double with it — every adapter
+ *  process on the desktop shares one sample per interval (quota-cache.ts), so
+ *  it is still about one control request per interval per account. Hovering
+ *  the ring asks for a fresher one on demand (`_claude/usage/refresh`).
+ *
  *  The floor is not timidity: each tick costs one control request, and neither
  *  the five-hour nor the seven-day window can move fast enough for a tighter
  *  loop to show anything a 15-second one would miss. */
-const QUOTA_POLL_DEFAULT_MS = 60_000;
+const QUOTA_POLL_DEFAULT_MS = 30_000;
 const QUOTA_POLL_FLOOR_MS = 15_000;
 
 /** Whether sessions ask the SDK for progress summaries on subagent tasks
@@ -916,6 +955,11 @@ export type Session = {
    *  so it cannot outlive the stream it queries. Undefined while polling is
    *  disabled or before the first turn settles. */
   accountUsageTimer?: ReturnType<typeof setInterval>;
+  /** The on-demand `_claude/usage/refresh` currently in flight, if any. A
+   *  second call while it runs awaits this same promise instead of issuing a
+   *  second control request: the client asks on every hover. Cleared when it
+   *  settles. */
+  usageRefreshInFlight?: Promise<boolean>;
   emitRawSDKMessages: boolean | SDKMessageFilter[];
   /** Whether nested subagent text/thinking is forwarded to the ACP client.
    *  Enabled by either the ACP capability or the pre-existing SDK option. */
@@ -2087,6 +2131,7 @@ export class ClaudeAcpAgent {
             promptQueueing: true,
           },
           [TASKS_CAPABILITY_KEY]: { version: TASKS_CAPABILITY_VERSION },
+          [USAGE_CAPABILITY_KEY]: { version: USAGE_CAPABILITY_VERSION },
         },
         promptCapabilities: {
           image: true,
@@ -2624,18 +2669,23 @@ export class ClaudeAcpAgent {
    */
   /** Fetch the account's quota windows and publish them to this session.
    *
-   *  `allowCache` is the difference between the two callers. A turn ending and a
+   *  `cacheMaxAgeMs` is the difference between the callers. A turn ending and a
    *  session being established are moments when THIS session's own consumption
-   *  just changed, so they always fetch. The idle poll has no such reason: it is
-   *  asking about an account, and every other adapter process on the desktop is
-   *  asking the same question about the same account. It reads the shared sample
-   *  instead -- see quota-cache.ts for why sharing, not tighter intervals, is
-   *  what makes separate windows agree. */
+   *  just changed, so they pass none and always fetch. The idle poll and the
+   *  on-demand refresh have no such reason: they are asking about an account,
+   *  and every other adapter process on the desktop is asking the same question
+   *  about the same account. They accept a shared sample up to that age instead
+   *  -- see quota-cache.ts for why sharing, not tighter intervals, is what makes
+   *  separate windows agree.
+   *
+   *  Resolves `true` when at least one window was published, `false` when none
+   *  was: no report, a report with no plan windows (an API-key session), or a
+   *  session replaced while the request was in flight. Never rejects. */
   private async publishAccountUsage(
     sessionId: string,
     session: Session,
-    { allowCache = false }: { allowCache?: boolean } = {},
-  ): Promise<void> {
+    { cacheMaxAgeMs }: { cacheMaxAgeMs?: number } = {},
+  ): Promise<boolean> {
     try {
       // Not `getUsage`: this awful spelling is the only name the real `Query`
       // answers to, and it is written out here rather than hidden behind a
@@ -2649,9 +2699,7 @@ export class ClaudeAcpAgent {
       // A sample another process already paid for, when this call is allowed to
       // take one. `null` covers every failure the cache can have, so a broken
       // cache degrades to exactly the behaviour that existed before it.
-      const cached = allowCache
-        ? await readFreshLimits(sharedSampleMaxAgeMs(quotaPollIntervalMs()))
-        : null;
+      const cached = cacheMaxAgeMs !== undefined ? await readFreshLimits(cacheMaxAgeMs) : null;
       const report =
         cached ??
         (await session.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
@@ -2667,7 +2715,7 @@ export class ClaudeAcpAgent {
       // flight (provider switch, a changed cwd on session/load). A successor
       // must not inherit its predecessor's windows.
       if (this.sessions[sessionId] !== session) {
-        return;
+        return false;
       }
       // `usage_update` is the only carrier ACP gives this `_meta`, and it
       // requires both numbers. `contextUsedTokens` is the session-scoped mirror
@@ -2683,6 +2731,7 @@ export class ClaudeAcpAgent {
       // single report's bars disagree about the context they were measured in.
       const used = session.contextUsedTokens ?? 0;
       const size = session.contextWindowSize;
+      let published = false;
       for (const window of this.accountUsageTracker(session).windowsFrom(report)) {
         await this.client.sessionUpdate({
           sessionId,
@@ -2693,9 +2742,12 @@ export class ClaudeAcpAgent {
             _meta: { "_claude/rateLimit": window },
           },
         });
+        published = true;
       }
+      return published;
     } catch (error) {
       this.logger.error(`Session ${sessionId}: structured usage report unavailable: ${error}`);
+      return false;
     }
   }
 
@@ -2717,6 +2769,7 @@ export class ClaudeAcpAgent {
     if (intervalMs === 0) {
       return;
     }
+    const cacheMaxAgeMs = sharedSampleMaxAgeMs(intervalMs);
     // Closure-local rather than a Session field: it guards this timer alone, and
     // a slow report must not let ticks pile up into a queue of duplicate control
     // requests against a session that is already struggling to answer one.
@@ -2735,13 +2788,81 @@ export class ClaudeAcpAgent {
       inFlight = true;
       // `publishAccountUsage` never rejects — it logs and returns — so this
       // cannot become an unhandled rejection, and `finally` always re-opens.
-      void this.publishAccountUsage(sessionId, session, { allowCache: true }).finally(() => {
+      void this.publishAccountUsage(sessionId, session, { cacheMaxAgeMs }).finally(() => {
         inFlight = false;
       });
     }, intervalMs);
     // A quota refresh is never a reason to keep the process alive.
     timer.unref?.();
     session.accountUsageTimer = timer;
+  }
+
+  /**
+   * `_claude/usage/refresh`: publish this session's quota windows now, on
+   * demand, and answer whether any were published.
+   *
+   * The client asks on every hover of the context ring, so the cost is bounded
+   * twice. A shared sample younger than {@link USAGE_REFRESH_MAX_SAMPLE_AGE_MS}
+   * answers without a control request, and a refresh already in flight for this
+   * session is joined rather than repeated — however fast the hovers come, one
+   * session never has two of these requests queued.
+   *
+   * Skipped while a turn is in flight, answering `{ refreshed: false }`. The
+   * report is read-only, but SDK control requests are SERIALIZED: an interrupt
+   * queued behind a usage request waits for it (upstream #1216 measured
+   * 0.7-1.1 s for the same queueing behind `getContextUsage`), and `cancel`
+   * awaits its interrupt. A hover during a turn is the common case — people
+   * watch the ring fill — so allowing it would put a round-trip in front of the
+   * Stop button exactly when it is most likely to be pressed. Nothing is lost:
+   * the turn's own end refreshes the windows (R1.2), and a live
+   * `rate_limit_event` still lands mid-turn.
+   *
+   * Before the first turn a control request may not be serviced at all on older
+   * CLIs (#886/#880); such a call simply waits, joined by every later hover,
+   * alongside the establishment refresh that is already waiting the same way.
+   *
+   * Never rejects for a missing report: a fetch failure is logged by
+   * `publishAccountUsage` and answers `false`, as does an API-key session,
+   * which has no plan windows to publish. Only an unknown session is an error,
+   * the same invalid-params error the `_claude/tasks` methods answer.
+   */
+  async refreshUsage(params: UsageRefreshRequest): Promise<UsageRefreshResponse> {
+    const { sessionId } = params;
+    const log = (outcome: string, reason?: string) =>
+      this.logger.log(
+        `[usage/refresh] method=${USAGE_REFRESH_METHOD} sessionId=${logValue(sessionId)} outcome=${outcome}` +
+          (reason ? ` reason=${reason}` : ""),
+      );
+    const session = Object.hasOwn(this.sessions, sessionId) ? this.sessions[sessionId] : undefined;
+    if (!session) {
+      log("error", "unknown_session");
+      throw RequestError.invalidParams(undefined, `unknown session ${sessionId}`);
+    }
+    if (session.queryClosed) {
+      log("skipped", "session_ended");
+      return { refreshed: false };
+    }
+    let coalesced = true;
+    let pending = session.usageRefreshInFlight;
+    if (!pending) {
+      if (session.turnQueue?.length || session.activeTurn) {
+        log("skipped", "turn_in_flight");
+        return { refreshed: false };
+      }
+      coalesced = false;
+      pending = this.publishAccountUsage(sessionId, session, {
+        cacheMaxAgeMs: USAGE_REFRESH_MAX_SAMPLE_AGE_MS,
+      }).finally(() => {
+        if (session.usageRefreshInFlight === pending) {
+          session.usageRefreshInFlight = undefined;
+        }
+      });
+      session.usageRefreshInFlight = pending;
+    }
+    // `publishAccountUsage` never rejects, so neither does this await.
+    const refreshed = await pending;
+    log(refreshed ? "published" : "nothing", coalesced ? "coalesced" : undefined);
+    return { refreshed };
   }
 
   private async publishGoalFromPrompt(
@@ -11206,6 +11327,11 @@ export function runAcp(logger?: Logger) {
       TASKS_BACKGROUND_METHOD,
       { parse: parseTasksBackgroundRequest },
       (ctx) => agent.backgroundTask(ctx.params),
+    )
+    .onRequest<UsageRefreshRequest, UsageRefreshResponse>(
+      USAGE_REFRESH_METHOD,
+      { parse: parseUsageRefreshRequest },
+      (ctx) => agent.refreshUsage(ctx.params),
     )
     .onRequest<GoalRequest, GoalControlResponse>(
       GOAL_CONTROL_METHOD,

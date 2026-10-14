@@ -374,14 +374,17 @@ describe("the structured usage report is requested at both borders, and while id
       // asks for the SHARED sample rather than paying for its own.
       const polled = vi
         .spyOn(
-          agent as unknown as { publishAccountUsage: () => Promise<void> },
+          agent as unknown as { publishAccountUsage: () => Promise<boolean> },
           "publishAccountUsage",
         )
-        .mockResolvedValue(undefined);
+        .mockResolvedValue(false);
 
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(30_000);
 
-      expect(polled).toHaveBeenCalledWith(SESSION_ID, expect.anything(), { allowCache: true });
+      // Nine tenths of the 30 s default: see `sharedSampleMaxAgeMs`.
+      expect(polled).toHaveBeenCalledWith(SESSION_ID, expect.anything(), {
+        cacheMaxAgeMs: 27_000,
+      });
       polled.mockRestore();
     } finally {
       vi.useRealTimers();
@@ -404,7 +407,7 @@ describe("the structured usage report is requested at both borders, and while id
     await agent.closeSession({ sessionId: SESSION_ID });
 
     // A timer that outlives its stream does not fail loudly — it just asks a
-    // dead session for a report once a minute, forever. `closeQueryStream` is
+    // dead session for a report every interval, forever. `closeQueryStream` is
     // the one point every teardown path passes through, which is why the
     // `clearInterval` lives there and nowhere else.
     expect(session.accountUsageTimer).toBeUndefined();
@@ -445,10 +448,10 @@ describe("the structured usage report is requested at both borders, and while id
         publishAccountUsage: (
           id: string,
           s: typeof session,
-          o: { allowCache: boolean },
-        ) => Promise<void>;
+          o: { cacheMaxAgeMs: number },
+        ) => Promise<boolean>;
       }
-    ).publishAccountUsage(SESSION_ID, session, { allowCache: true });
+    ).publishAccountUsage(SESSION_ID, session, { cacheMaxAgeMs: 27_000 });
 
     // No second request...
     expect(usage).toHaveBeenCalledTimes(1);
@@ -491,10 +494,10 @@ describe("the structured usage report is requested at both borders, and while id
         publishAccountUsage: (
           id: string,
           s: typeof session,
-          o: { allowCache: boolean },
-        ) => Promise<void>;
+          o: { cacheMaxAgeMs: number },
+        ) => Promise<boolean>;
       }
-    ).publishAccountUsage(SESSION_ID, session, { allowCache: true });
+    ).publishAccountUsage(SESSION_ID, session, { cacheMaxAgeMs: 27_000 });
 
     expect(usage).toHaveBeenCalledTimes(2);
   });
@@ -524,8 +527,10 @@ describe("the structured usage report is requested at both borders, and while id
 
 describe("the idle refresh interval is read from the environment", () => {
   it("defaults when unset or empty", () => {
-    expect(quotaPollIntervalMs(undefined)).toBe(60_000);
-    expect(quotaPollIntervalMs("   ")).toBe(60_000);
+    // 30 s since the quota tooltip (it was 60 s): the tooltip shows the windows
+    // as numbers, so a minute-old reading was visible as one.
+    expect(quotaPollIntervalMs(undefined)).toBe(30_000);
+    expect(quotaPollIntervalMs("   ")).toBe(30_000);
   });
 
   it("treats exactly 0 as off, because that is the only way to ask", () => {
@@ -536,13 +541,15 @@ describe("the idle refresh interval is read from the environment", () => {
     // Each tick is a control request, and neither window moves fast enough for
     // a tighter loop to show something a 15-second one would miss.
     expect(quotaPollIntervalMs("1")).toBe(15_000);
-    expect(quotaPollIntervalMs("30000")).toBe(30_000);
+    expect(quotaPollIntervalMs("20000")).toBe(20_000);
+    // The env override still wins over the default, in both directions.
+    expect(quotaPollIntervalMs("60000")).toBe(60_000);
   });
 
   it("falls back to the default on garbage, never to off", () => {
     // A typo must not silently restore the stale-bars behaviour this exists to
     // fix; only an explicit 0 may do that.
-    expect(quotaPollIntervalMs("banana")).toBe(60_000);
-    expect(quotaPollIntervalMs("-5")).toBe(60_000);
+    expect(quotaPollIntervalMs("banana")).toBe(30_000);
+    expect(quotaPollIntervalMs("-5")).toBe(30_000);
   });
 });
