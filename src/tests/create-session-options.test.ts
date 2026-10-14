@@ -8,6 +8,7 @@ import * as path from "node:path";
 
 let capturedOptions: Options | undefined;
 let contextUsageResult: (() => Promise<{ rawMaxTokens: number; model?: string }>) | undefined;
+let contextUsageCalls: Array<{ detail?: "summary" | "full" } | undefined> = [];
 let interruptImpl: (() => Promise<undefined>) | undefined;
 let closeSpy: ReturnType<typeof vi.fn<() => void>>;
 vi.mock("@anthropic-ai/claude-agent-sdk", async () => {
@@ -32,8 +33,10 @@ vi.mock("@anthropic-ai/claude-agent-sdk", async () => {
             },
           ],
         }),
-        getContextUsage: () =>
-          contextUsageResult ? contextUsageResult() : Promise.resolve(DEFAULT_CONTEXT_USAGE),
+        getContextUsage: (opts?: { detail?: "summary" | "full" }) => {
+          contextUsageCalls.push(opts);
+          return contextUsageResult ? contextUsageResult() : Promise.resolve(DEFAULT_CONTEXT_USAGE);
+        },
       });
     },
   };
@@ -63,6 +66,7 @@ describe("createSession options merging", () => {
   beforeEach(async () => {
     capturedOptions = undefined;
     contextUsageResult = undefined;
+    contextUsageCalls = [];
     interruptImpl = undefined;
     closeSpy = vi.fn<() => void>();
 
@@ -774,6 +778,15 @@ describe("createSession options merging", () => {
 
       await vi.waitFor(() => expect(sessionFor(response.sessionId).contextWindowSize).toBe(967000));
       expect(sessionFor(response.sessionId).contextWindowAuthoritative).toBe(true);
+    });
+
+    it("asks for the summary context usage so the CLI sends no count_tokens requests", async () => {
+      // Parity item 97 (upstream #1258): the default `full` detail counts each
+      // context category with its own messages/count_tokens request, while
+      // only `rawMaxTokens` is needed here.
+      await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
+
+      await vi.waitFor(() => expect(contextUsageCalls).toEqual([{ detail: "summary" }]));
     });
 
     it("keeps the guessed window when getContextUsage reports a non-positive size", async () => {

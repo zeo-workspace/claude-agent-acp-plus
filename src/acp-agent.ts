@@ -7726,6 +7726,13 @@ export class ClaudeAcpAgent {
    * Not written to `contextWindowCache` — that stays keyed to the
    * `result.modelUsage` spellings — and a result still overwrites it.
    * Ported from upstream #1186.
+   *
+   * Asks for the `summary` detail (parity item 97, upstream #1258): the
+   * default `full` breakdown issues one `messages/count_tokens` call per
+   * category, and only `rawMaxTokens` is read here. The two other callers
+   * (`readResumedLiveModel`, `fetchContextUsedTokens`) read `totalTokens`,
+   * which `summary` takes from the last response's usage plus local
+   * estimates instead of counting — not the same number, so they keep `full`.
    */
   private refreshContextWindowInBackground(sessionId: string, session: Session): void {
     if (session.contextWindowAuthoritative) return;
@@ -7737,7 +7744,7 @@ export class ClaudeAcpAgent {
       session.models.currentModelId === modelId;
     // A synchronous throw must not fail the caller either.
     Promise.resolve()
-      .then(() => query.getContextUsage())
+      .then(() => query.getContextUsage({ detail: "summary" }))
       .then(
         (usage) => {
           if (!stillCurrent() || session.contextWindowAuthoritative) return;

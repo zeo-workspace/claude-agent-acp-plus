@@ -932,6 +932,7 @@ describe("session config options", () => {
 
       // The switch resolved without waiting for getContextUsage.
       expect(session.query.getContextUsage).toHaveBeenCalledOnce();
+      expect(session.query.getContextUsage).toHaveBeenCalledWith({ detail: "summary" });
       expect(session.contextWindowSize).toBe(200000);
 
       answer({ rawMaxTokens: 967000 });
