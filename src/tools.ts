@@ -171,6 +171,40 @@ function normalizeWriteInput(input: unknown): FileWriteInput | undefined {
   return { ...raw, file_path: filePath, content } as FileWriteInput;
 }
 
+/** Read a Bash or PowerShell input's description the way the CLI validates it.
+ *  Since CLI 2.1.295 the CLI accepts `command_description` for `description`,
+ *  but the streamed tool_use block keeps the key the model sent. The canonical
+ *  key wins when both spellings are present. (Upstream #1330.) */
+export function shellDescription(input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const raw = input as Record<string, unknown>;
+  if (typeof raw.description === "string") return raw.description;
+  return typeof raw.command_description === "string" ? raw.command_description : undefined;
+}
+
+/** Read a Grep input's path the way the CLI validates it. Since CLI 2.1.292 the
+ *  CLI accepts `file_path` for `path`; the canonical key wins when both are
+ *  present. (Upstream #1271.) */
+export function grepPath(input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const raw = input as Record<string, unknown>;
+  if (typeof raw.path === "string") return raw.path;
+  return typeof raw.file_path === "string" ? raw.file_path : undefined;
+}
+
+/** Read a Grep input's output mode the way the CLI validates it. Since CLI
+ *  2.1.295 the CLI reads a `-l` or `-c` flag (`true` or `"true"`) as
+ *  `output_mode: "files_with_matches"` or `"count"` when `output_mode` is
+ *  unset. (Upstream #1330.) */
+function grepOutputMode(input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const raw = input as Record<string, unknown>;
+  if (typeof raw.output_mode === "string") return raw.output_mode;
+  if (raw["-l"] === true || raw["-l"] === "true") return "files_with_matches";
+  if (raw["-c"] === true || raw["-c"] === "true") return "count";
+  return undefined;
+}
+
 export function toolInfoFromToolUse(
   toolUse: any,
   supportsTerminalOutput: boolean = false,
@@ -182,8 +216,13 @@ export function toolInfoFromToolUse(
     case "Agent":
     case "Task": {
       const input = toolUse.input as AgentInput | BashInput | undefined;
+      // `effort` is set only when the user asked for one (CLI 2.1.292+).
+      const effort =
+        input && "effort" in input && typeof input.effort === "string"
+          ? ` (${input.effort} effort)`
+          : "";
       return {
-        title: input?.description ? input.description : "Task",
+        title: (input?.description ? input.description : "Task") + effort,
         kind: "think",
         content:
           input && "prompt" in input
@@ -200,16 +239,17 @@ export function toolInfoFromToolUse(
     case "Bash":
     case "PowerShell": {
       const input = toolUse.input as BashInput | undefined;
+      const description = shellDescription(input);
       return {
         title: input?.command ? input.command : "Terminal",
         kind: "execute",
         content: supportsTerminalOutput
           ? [{ type: "terminal" as const, terminalId: toolUse.id }]
-          : input && input.description
+          : description
             ? [
                 {
                   type: "content",
-                  content: { type: "text", text: input.description },
+                  content: { type: "text", text: description },
                 },
               ]
             : [],
@@ -333,8 +373,9 @@ export function toolInfoFromToolUse(
         label += ` -C ${input["-C"]}`;
       }
 
-      if (input?.output_mode) {
-        switch (input.output_mode) {
+      const outputMode = grepOutputMode(input);
+      if (outputMode) {
+        switch (outputMode) {
           case "files_with_matches":
             label += " -l";
             break;
@@ -367,8 +408,9 @@ export function toolInfoFromToolUse(
         label += ` "${input.pattern}"`;
       }
 
-      if (input?.path) {
-        label += ` ${input.path}`;
+      const searchPath = grepPath(input);
+      if (searchPath) {
+        label += ` ${searchPath}`;
       }
 
       return {
@@ -380,8 +422,10 @@ export function toolInfoFromToolUse(
 
     case "WebFetch": {
       const input = toolUse.input as WebFetchInput;
+      // `offset` reads on through a page too long for one call (CLI 2.1.290+).
+      const from = input?.offset ? ` (from char ${input.offset})` : "";
       return {
-        title: input?.url ? `Fetch ${input.url}` : "Fetch",
+        title: input?.url ? `Fetch ${input.url}${from}` : "Fetch",
         kind: "fetch",
         content:
           input && input.prompt
