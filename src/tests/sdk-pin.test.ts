@@ -37,6 +37,14 @@ import { fileURLToPath } from "node:url";
  *     `completed: 2`. The placeholder-result shape this cliff predicts did not
  *     appear.
  *
+ *   - **0.3.285 -> 0.3.296, 2026-10-15, by hand.** CLI 2.1.296 for Claude
+ *     Haiku 5.5 and the `request_marker_lists_v1` capability, inside the
+ *     7-day cooldown by operator decision, with upstream #1271/#1330's
+ *     companions (the `run_id` late-run drop, the CLI input aliases). Neither
+ *     cliff above moved in that range; the background-subagent probe was NOT
+ *     re-run for it (the bump's live check stopped at session/new, no model
+ *     turn).
+ *
  * Neither measurement is a regression test, and that is the point of the
  * paragraph below: re-measure on the next crossing rather than trusting green.
  *
@@ -71,7 +79,7 @@ const MIRROR_ROOT = join(HERE, "..", "..");
 const FORK_ROOT = join(MIRROR_ROOT, "..", "fork");
 
 const SDK = "@anthropic-ai/claude-agent-sdk";
-const PINNED = "0.3.285";
+const PINNED = "0.3.296";
 
 function readJson(path: string): Record<string, any> {
   return JSON.parse(readFileSync(path, "utf8"));

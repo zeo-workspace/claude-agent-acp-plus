@@ -205,6 +205,7 @@ import {
   parseTaskUpdateOutput,
   planEntries,
   registerHookCallback,
+  shellDescription,
   TaskState,
   taskStateToPlanEntries,
   toolInfoFromToolUse,
@@ -335,9 +336,12 @@ const STEER_METHOD = "_session/steering";
 
 /** How urgently the SDK delivers a steered message relative to the running
  *  turn — an internal Claude implementation detail, not part of the wire
- *  contract. `now` pre-empts the current generation and handles the message
- *  immediately (interrupting a single-shot response, or slotting in between a
- *  multi-step turn's tool calls), while `later` waits for a pending
+ *  contract. `now` hands the message to the running turn at once: since SDK
+ *  0.3.286 (CLI 2.1.286) it moves running shell commands, agents and MCP calls
+ *  to the background and JOINS the running turn instead of stopping it (before
+ *  0.3.286 it aborted the cycle and ran the message as a second one; a
+ *  WebFetch/WebSearch it steps past reports `{ detachedToolCall: true }` from
+ *  0.3.287). `later` waits for a pending
  *  permission/elicitation callback to settle instead of cancelling its ACP
  *  request and hiding the client's user-input card (IJAI-1191). Maps to
  *  `SDKUserMessage.priority`; injected steering uses `now` unless the session is
@@ -673,13 +677,16 @@ type Turn = {
   deferredSettle?: PromptResponse;
   /** Uuids of `steer()`-injected messages the SDK has not replayed back yet.
    *
-   *  A steer is normally delivered at {@link STEER_PRIORITY_NOW}, so the CLI
-   *  ABORTS the running cycle: it emits its own human-origin `result` —
-   *  indistinguishable from a turn's terminal one — and the steered message runs
-   *  as a SECOND cycle. Settling at that result would answer `session/prompt`
-   *  mid-work, so a steered turn's results only RECORD their outcome
-   *  (`steeredSettle`) and it settles at the SDK's `idle`, the only signal
-   *  spanning both cycles (CLI 2.1.220).
+   *  A steer is normally delivered at {@link STEER_PRIORITY_NOW}. Up to CLI
+   *  2.1.285 that ABORTED the running cycle: it emitted its own human-origin
+   *  `result` — indistinguishable from a turn's terminal one — and the steered
+   *  message ran as a SECOND cycle (CLI 2.1.220). Since SDK 0.3.286 (CLI
+   *  2.1.286) a `now` message instead joins the running turn, moving running
+   *  shells, agents and MCP calls to the background, so usually only one
+   *  `result` follows. Either way a result seen while the steered echo is
+   *  pending is not proof the steered work ran, so a steered turn's results
+   *  only RECORD their outcome (`steeredSettle`) and it settles at the SDK's
+   *  `idle`, the one signal that is correct under both behaviours.
    *
    *  A non-empty set at an idle means the steered cycle hasn't started — the CLI
    *  replays a message only when it picks it up, always after the interrupted
@@ -1153,6 +1160,11 @@ export type Session = {
    *  call returns as soon as the command detaches); the exit goes out when the
    *  task ends. Only for a client that renders terminals. */
   backgroundTerminals?: Map<string, { toolCallId: string; parentToolUseId?: string }>;
+  /** The latest `run_id` seen on each task's events, so a late frame of an
+   *  earlier run is dropped (see `isLateTaskRun`, upstream #1271). Run ids are
+   *  per CLI process, so a query recreate clears it. Bounded by
+   *  `MAX_TASK_RUN_IDS`, oldest first. */
+  taskRunIds?: Map<string, string>;
   /** The task feed (story 012): every task message folded into the
    *  `_claude/tasks` snapshot, published through `taskFeedPublisher`. Both
    *  live as long as the SESSION, not the consumer — a query recreate keeps
@@ -1277,6 +1289,31 @@ const AUTONOMOUS_RESULT_ORIGINS: ReadonlySet<SDKMessageOrigin["kind"]> = new Set
  *  held for background subagents it spawned (see Turn.deferredSettle). The
  *  single spelling of the hold predicate, shared by the consumer's settle
  *  lanes and cancel(). */
+/** The number of tasks whose latest run a session remembers (see
+ *  `Session.taskRunIds`). */
+const MAX_TASK_RUN_IDS = 1024;
+
+/** Records `runId` as the latest run of `taskId`, and returns true when it
+ *  names a run that opened before the latest one seen. Such a frame is late:
+ *  a resumed task keeps its `task_id` and gets a new `run_id` (SDK 0.3.292+),
+ *  and a queued `task_notification` of the finished run can arrive after the
+ *  resume. Applied, it would close the new run. Run ids of one task sort in
+ *  run order by plain string comparison. Frames without one (older CLIs) are
+ *  never late. Ported from upstream #1271. */
+function isLateTaskRun(session: Session, taskId: string, runId: string | undefined): boolean {
+  if (runId === undefined) return false;
+  const runs = (session.taskRunIds ??= new Map());
+  const latest = runs.get(taskId);
+  if (latest !== undefined && runId < latest) return true;
+  runs.delete(taskId);
+  runs.set(taskId, runId);
+  if (runs.size > MAX_TASK_RUN_IDS) {
+    const oldest = runs.keys().next().value;
+    if (oldest !== undefined) runs.delete(oldest);
+  }
+  return false;
+}
+
 function isHeldOpen(
   turn: Turn | null | undefined,
 ): turn is Turn & { deferredSettle: PromptResponse } {
@@ -1510,12 +1547,11 @@ export type ToolUseCache = {
   };
 };
 
-/** A cached tool call's `description` input, when it is a string. */
+/** A cached tool call's `description` input, when it is a string — or, for a
+ *  shell call, its `command_description` alias (CLI 2.1.295+, upstream #1330). */
 function toolDescriptionOf(cache: ToolUseCache, toolUseId: unknown): string | undefined {
   if (typeof toolUseId !== "string") return undefined;
-  const input = cache[toolUseId]?.input;
-  if (typeof input !== "object" || input === null || !("description" in input)) return undefined;
-  return typeof input.description === "string" ? input.description : undefined;
+  return shellDescription(cache[toolUseId]?.input);
 }
 
 type StreamedToolInput = {
@@ -2941,17 +2977,20 @@ export class ClaudeAcpAgent {
    *  into the in-flight turn. The injected message's echo carries a uuid that
    *  matches no queued turn, so the consumer drops it as an unrelated replay
    *  without promoting/settling anything. It is normally delivered at {@link
-   *  STEER_PRIORITY_NOW} so it pre-empts the current generation (interrupting a
-   *  single-shot response, or slotting in between a multi-step turn's tool
-   *  calls). While a permission or elicitation is awaiting user input it uses
+   *  STEER_PRIORITY_NOW}, which since SDK 0.3.286 joins the running turn
+   *  (running shells, agents and MCP calls move to the background) rather than
+   *  stopping it. While a permission or elicitation is awaiting user input it uses
    *  {@link STEER_PRIORITY_LATER} instead, because interrupting that SDK
    *  callback cancels the ACP request and can strand the prompt (IJAI-1191).
    *  The steered message's own output streams via `session/update`, not this
    *  response.
    *
-   *  Pre-empting means ABORTING: the interrupted cycle emits a `result` of its
-   *  own and the steered message runs as a second one, so the turn is marked
-   *  (`Turn.steeredEchoes`) to settle at the SDK's `idle` instead of that result.
+   *  Before 0.3.286 delivering `now` ABORTED the cycle, which emitted a `result`
+   *  of its own before the steered message ran as a second one; since then it
+   *  joins the turn. The turn is marked (`Turn.steeredEchoes`) to settle at the
+   *  SDK's `idle` instead of at a result in both cases, so either CLI behaviour
+   *  settles once, after the steered work. Zeo sends no ACP steering, so none
+   *  of this is reachable from it.
    *
    *  When the session is idle, the opt-in path returns `promptRequired` WITHOUT
    *  calling `prompt()`, pushing SDK input, or mutating `turnQueue`: the content
@@ -4839,9 +4878,21 @@ export class ClaudeAcpAgent {
               case "files_persisted":
                 break;
               case "task_progress":
+                if (isLateTaskRun(session, message.task_id, message.run_id)) {
+                  this.logger.log(
+                    `[task/late-run] dropped=task_progress task=${message.task_id} run=${message.run_id}`,
+                  );
+                  break;
+                }
                 session.taskFeedPublisher?.notify(session.taskFeed!.onProgress(message));
                 break;
               case "task_started":
+                if (isLateTaskRun(session, message.task_id, message.run_id)) {
+                  this.logger.log(
+                    `[task/late-run] dropped=task_started task=${message.task_id} run=${message.run_id}`,
+                  );
+                  break;
+                }
                 // For subagent tasks `task_id` is the subagent's agent id (the
                 // SDK keys its task registry by agent id) and `tool_use_id` is
                 // the Agent/Task tool_use that spawned it — recorded so the
@@ -4879,6 +4930,12 @@ export class ClaudeAcpAgent {
                 );
                 break;
               case "task_notification":
+                if (isLateTaskRun(session, message.task_id, message.run_id)) {
+                  this.logger.log(
+                    `[task/late-run] dropped=task_notification task=${message.task_id} run=${message.run_id}`,
+                  );
+                  break;
+                }
                 // The task settled — no further tool calls can originate
                 // from it, so its registry entry can be dropped.
                 session.liveBackgroundTasks.delete(message.task_id);
@@ -4901,6 +4958,12 @@ export class ClaudeAcpAgent {
                 }
                 break;
               case "task_updated":
+                if (isLateTaskRun(session, message.task_id, message.run_id)) {
+                  this.logger.log(
+                    `[task/late-run] dropped=task_updated task=${message.task_id} run=${message.run_id}`,
+                  );
+                  break;
+                }
                 // terminal-status task_updated patch and a (deduplicated)
                 // task_notification when a task settles, but only the patch is
                 // guaranteed per transition — prune on it too so the registry
@@ -5500,11 +5563,13 @@ export class ClaudeAcpAgent {
                 break;
               }
 
-              // A priority:'now' steer can make the SDK terminate the
-              // interrupted cycle with an error-shaped diagnostic result
-              // before it replays the injected message's echo. That result is
-              // not the steered command's outcome: keep it on the steer lane
-              // and let the cycle after the pending echo decide the turn.
+              // Up to CLI 2.1.285 a priority:'now' steer could make the SDK
+              // terminate the interrupted cycle with an error-shaped
+              // diagnostic result before it replayed the injected message's
+              // echo (since 0.3.286 the message joins the turn instead, so
+              // this lane is kept for older CLIs). That result is not the
+              // steered command's outcome: keep it on the steer lane and let
+              // the cycle after the pending echo decide the turn.
               if (
                 message.is_error &&
                 isSteering(session.activeTurn) &&
@@ -8342,6 +8407,9 @@ export class ClaudeAcpAgent {
       session.query = newQuery;
       session.input = newInput;
       session.queryOptions = options;
+      // Run ids are per CLI process: the replacement's must not be judged
+      // against the old process's (see isLateTaskRun).
+      session.taskRunIds = undefined;
       // The superseded consumer exits via its guards without touching the
       // session; drop its handle so the caller's ensureConsumer starts a
       // fresh consumer for the new query.
@@ -10719,12 +10787,8 @@ function claudeCodeMetaFromToolUse(
   cwd?: string,
 ): NonNullable<ToolUpdateMeta["claudeCode"]> {
   const description =
-    (toolUse.name === "Bash" || toolUse.name === "PowerShell") &&
-    toolUse.input !== null &&
-    typeof toolUse.input === "object" &&
-    "description" in toolUse.input &&
-    typeof toolUse.input.description === "string"
-      ? toolUse.input.description
+    toolUse.name === "Bash" || toolUse.name === "PowerShell"
+      ? shellDescription(toolUse.input)
       : undefined;
   const skillName =
     toolUse.name === "Skill"

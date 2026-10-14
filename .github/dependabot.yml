@@ -73,6 +73,12 @@ updates:
       # background subagents, SUSPECT THIS FIRST and re-run the probe before
       # looking anywhere else. The honest state is "measured safe", not "ported".
       #
+      # RAISED BY HAND AGAIN 2026-10-15: 0.3.285 -> 0.3.296 (CLI 2.1.296), for
+      # Claude Haiku 5.5 and the request_marker_lists_v1 capability, inside the
+      # 7-day cooldown by operator decision, with upstream #1271/#1330's
+      # companions ported in the same change. The probe above was not re-run
+      # for it.
+      #
       # WHY THE IGNORE STAYS, with both reasons now behind the pin. It stops the
       # PROPOSAL; the guard stops the MERGE; and only the guard survives a bump
       # made by hand -- so they are not redundant. The unit suite cannot catch a
