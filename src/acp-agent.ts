@@ -1133,6 +1133,13 @@ export type Session = {
       endedPerLevel?: "ended" | "sweep-armed";
     }
   >;
+  /** Parity item 92 (upstream #1312): the display terminals of commands sent
+   *  to the background that still run, by the id of the command's task — the
+   *  Bash tool call whose terminal it is, and the subagent tool call that ran
+   *  it, if any. The tool result's `terminal_exit` is withheld for these (the
+   *  call returns as soon as the command detaches); the exit goes out when the
+   *  task ends. Only for a client that renders terminals. */
+  backgroundTerminals?: Map<string, { toolCallId: string; parentToolUseId?: string }>;
   /** The task feed (story 012): every task message folded into the
    *  `_claude/tasks` snapshot, published through `taskFeedPublisher`. Both
    *  live as long as the SESSION, not the consumer — a query recreate keeps
@@ -1453,7 +1460,8 @@ export type ToolUpdateMeta = {
   };
   terminal_exit?: {
     terminal_id: string;
-    exit_code: number;
+    /** Null when the code is not known (as in `TerminalExitStatus`). */
+    exit_code: number | null;
     signal: string | null;
   };
 };
@@ -3739,6 +3747,34 @@ export class ClaudeAcpAgent {
      *  while true, the turn's settlement stays deferred so the subagent's
      *  output and permission requests land inside it (see
      *  Turn.deferredSettle). */
+    /** Ends the display terminal of a command that went to the background,
+     *  once its task ends (see `Session.backgroundTerminals`). The code is the
+     *  one Claude Code's summary names, else 1 for a failed or stopped task —
+     *  a known failure never goes out as null — and null for a completion
+     *  that names none. */
+    const endBackgroundTerminal = async (taskId: string, exitCode: number | null) => {
+      const terminal = session.backgroundTerminals?.get(taskId);
+      if (!terminal) return;
+      session.backgroundTerminals!.delete(taskId);
+      await sendUpdate({
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: terminal.toolCallId,
+          _meta: {
+            ...(terminal.parentToolUseId
+              ? { claudeCode: { parentToolUseId: terminal.parentToolUseId } }
+              : {}),
+            terminal_exit: {
+              terminal_id: terminal.toolCallId,
+              exit_code: exitCode,
+              signal: null,
+            },
+          },
+        },
+      });
+    };
+
     const turnAwaitingSubagents = (turn: Turn) => {
       if (!turn.spawnedTaskIds?.size) {
         return false;
@@ -4799,6 +4835,10 @@ export class ClaudeAcpAgent {
                 // The task settled — no further tool calls can originate
                 // from it, so its registry entry can be dropped.
                 session.liveBackgroundTasks.delete(message.task_id);
+                await endBackgroundTerminal(
+                  message.task_id,
+                  backgroundExitCode(message.status, message.summary),
+                );
                 if (session.taskFeed && session.taskFeedPublisher) {
                   const readable = await endingOutputReadable(
                     session,
@@ -4824,6 +4864,12 @@ export class ClaudeAcpAgent {
                   message.patch.status === "killed"
                 ) {
                   session.liveBackgroundTasks.delete(message.task_id);
+                  // Usually first: the notification with its summary follows
+                  // but is not guaranteed, so the terminal ends here.
+                  await endBackgroundTerminal(
+                    message.task_id,
+                    backgroundExitCode(message.patch.status, message.patch.error),
+                  );
                 }
                 if (session.taskFeed && session.taskFeedPublisher) {
                   // The CLI queues the terminal patch BEFORE the
@@ -6139,6 +6185,20 @@ export class ClaudeAcpAgent {
             // Before toAcpNotifications, which prunes the tool_use cache entry
             // that says the result is a Bash call's.
             observeBackgroundBashResult(message, content, session);
+            // The command's terminal runs until its task ends, unless the task
+            // has ended already (a fast command can end before its result).
+            const runningTerminal =
+              this.clientCapabilities?._meta?.["terminal_output"] === true
+                ? backgroundBashTerminal(message, content, session)
+                : undefined;
+            if (runningTerminal && session.liveBackgroundTasks.has(runningTerminal.taskId)) {
+              (session.backgroundTerminals ??= new Map()).set(runningTerminal.taskId, {
+                toolCallId: runningTerminal.toolCallId,
+                ...(message.parent_tool_use_id
+                  ? { parentToolUseId: message.parent_tool_use_id }
+                  : {}),
+              });
+            }
 
             for (const notification of toAcpNotifications(
               content,
@@ -6178,7 +6238,14 @@ export class ClaudeAcpAgent {
               // filtered out of `content` above; blocks that do pass through
               // (e.g. a subagent image) carry the stamped parentToolUseId
               // meta and are excluded there.
-              await sendUpdate(acceptedPlanToolResult(notification, acceptedPlanToolUseId));
+              await sendUpdate(
+                withRunningTerminal(
+                  acceptedPlanToolResult(notification, acceptedPlanToolUseId),
+                  runningTerminal && session.backgroundTerminals?.has(runningTerminal.taskId)
+                    ? runningTerminal.toolCallId
+                    : undefined,
+                ),
+              );
             }
             break;
           }
@@ -11624,6 +11691,83 @@ function getMatchingModelUsage(modelUsage: Record<string, ModelUsage>, currentMo
     // back to a bare id (rows without `resolvedModel`).
     return { key: bestKey, usage: modelUsage[bestKey] };
   }
+}
+
+/**
+ * Parity item 92: the Bash tool call and task of a command this result sent to
+ * the background — the structured `BashOutput` carries `backgroundTaskId`, and
+ * the message holds exactly one tool_result, of a Bash call.
+ */
+function backgroundBashTerminal(
+  message: { type: string; tool_use_result?: unknown },
+  content: unknown,
+  session: Pick<Session, "toolUseCache">,
+): { taskId: string; toolCallId: string } | undefined {
+  if (message.type !== "user" || !Array.isArray(content)) return undefined;
+  const result = message.tool_use_result;
+  if (typeof result !== "object" || result === null || !("backgroundTaskId" in result)) {
+    return undefined;
+  }
+  const taskId = result.backgroundTaskId;
+  if (typeof taskId !== "string" || taskId === "") return undefined;
+  const blocks = content.filter(
+    (c): c is { type: "tool_result"; tool_use_id: string } =>
+      typeof c === "object" && c !== null && c.type === "tool_result",
+  );
+  if (blocks.length !== 1) return undefined;
+  const toolCallId = blocks[0].tool_use_id;
+  if (session.toolUseCache[toolCallId]?.name !== "Bash") return undefined;
+  return { taskId, toolCallId };
+}
+
+/**
+ * Drops `terminal_exit` from the tool result update of `toolCallId`: the Bash
+ * call returned as soon as its command detached, and the exit would mark the
+ * terminal as ended while the command still runs.
+ */
+export function withRunningTerminal(
+  notification: SessionNotification,
+  toolCallId: string | undefined,
+): SessionNotification {
+  const update = notification.update;
+  if (
+    toolCallId === undefined ||
+    update.sessionUpdate !== "tool_call_update" ||
+    update.toolCallId !== toolCallId ||
+    !update._meta ||
+    !("terminal_exit" in update._meta)
+  ) {
+    return notification;
+  }
+  const meta = { ...update._meta };
+  delete meta.terminal_exit;
+  const next: typeof update = { ...update, _meta: meta };
+  if (Object.keys(meta).length === 0) delete next._meta;
+  return { ...notification, update: next };
+}
+
+/**
+ * The exit code of a background command whose task ended, from what the task's
+ * ending says. Claude Code's summary reads `Background command "<d>" completed
+ * (exit code N[: note])` or `… failed with exit code N` (CLI 2.1.285); an
+ * ending names a code only at its end, so a description holding the words
+ * cannot be mistaken for it. A completion with a non-zero code is one Claude
+ * Code accepted as a success (grep's "No matches found"), so it goes out as
+ * null; a failure or stop that names no code goes out as 1, never null.
+ */
+export function backgroundExitCode(
+  status: string | undefined,
+  text: string | undefined,
+): number | null {
+  const failed = status === "failed" || status === "killed" || status === "stopped";
+  const said = typeof text === "string" ? text : "";
+  if (failed) {
+    const match = /exit code (\d+)\s*$/.exec(said);
+    return match ? Number(match[1]) : 1;
+  }
+  const match = /\(exit code (\d+)(?::[^)]*)?\)\s*$/.exec(said);
+  if (match && Number(match[1]) === 0) return 0;
+  return null;
 }
 
 /**
