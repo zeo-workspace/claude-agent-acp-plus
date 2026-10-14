@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.26.0...v0.27.0) (2026-10-14)
+
+
+### Features
+
+* **usage:** refresh the quota windows on demand and poll every 30 s ([d8fa38f](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/d8fa38f4a3a6fa8066da6eabba2f01698d499dd8))
+
 ## [0.26.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.25.3...v0.26.0) (2026-10-12)
 
 
