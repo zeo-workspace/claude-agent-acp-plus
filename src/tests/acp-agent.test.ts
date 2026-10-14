@@ -34,6 +34,7 @@ import {
   stripLocalCommandMetadata,
   ClaudeAcpAgent,
   BACKGROUND_TASKS_META_KEY,
+  HELD_TURN_DRAIN_GRACE_MS,
   claudeCliPath,
   computeSessionFingerprint,
   streamEventToAcpNotifications,
@@ -12617,6 +12618,216 @@ describe("deferred settlement for live background subagents (issues #864/#866)",
     expect(record?.endedPerLevel).toBe("ended");
     releaseIdle();
     await agent.sessions["test-session"]?.consumer;
+  });
+
+  // Parity item 106 (upstream issue #1284, open): a turn held for its background
+  // subagents must still answer session/prompt when a subagent's
+  // task_notification is lost. Each case below loses the notification and keeps
+  // a different one of the other end signals.
+  describe("a lost task_notification (item 106, upstream #1284)", () => {
+    const subagentEnded = (taskId: string) => ({
+      type: "system",
+      subtype: "task_updated",
+      task_id: taskId,
+      patch: { status: "completed", end_time: 1 },
+      uuid: randomUUID(),
+      session_id: "test-session",
+    });
+
+    /** Runs a turn that spawns `agent-1`, then streams `after`, then parks the
+     *  stream (no further message ever comes). Resolves with the prompt's
+     *  answer, or "held" if none came within `withinMs`. */
+    async function heldTurn(after: unknown[], withinMs = 300) {
+      const agent = createMockAgent();
+      let release!: () => void;
+      const parked = new Promise<void>((resolve) => (release = resolve));
+      injectGeneratorSession(agent, (input) => {
+        async function* messageGenerator() {
+          const iter = input[Symbol.asyncIterator]();
+          const { value: userMessage } = await iter.next();
+          yield userEcho(userMessage);
+          yield running();
+          yield subagentStarted("agent-1");
+          yield resultMessage();
+          for (const message of after) yield message;
+          await parked;
+        }
+        return messageGenerator();
+      });
+      const answer = agent
+        .prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "explore" }] })
+        .then((response) => response.stopReason);
+      const outcome = await Promise.race([
+        answer,
+        new Promise<"held">((resolve) => setTimeout(() => resolve("held"), withinMs)),
+      ]);
+      release();
+      return { outcome, agent };
+    }
+
+    it("answers at the drain idle when only the terminal task_updated arrives", async () => {
+      const { outcome } = await heldTurn([subagentEnded("agent-1"), idle()]);
+      expect(outcome).toBe("end_turn");
+    });
+
+    it("answers at the drain idle when only the level signal says the subagent is gone", async () => {
+      const { outcome } = await heldTurn([backgroundTasksChanged([]), idle()]);
+      expect(outcome).toBe("end_turn");
+    });
+
+    it("answers when the end arrives after the turn's only idle (pre-2.1.270 cadence)", async () => {
+      // result -> idle -> the subagent ends -> (the notification that would have
+      // woken a followup cycle is lost) -> nothing more. No idle follows.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const agent = createMockAgent();
+        let release!: () => void;
+        const parked = new Promise<void>((resolve) => (release = resolve));
+        let ended = false;
+        injectGeneratorSession(agent, (input) => {
+          async function* messageGenerator() {
+            const iter = input[Symbol.asyncIterator]();
+            const { value: userMessage } = await iter.next();
+            yield userEcho(userMessage);
+            yield running();
+            yield subagentStarted("agent-1");
+            yield resultMessage();
+            yield idle();
+            yield subagentEnded("agent-1");
+            ended = true;
+            await parked;
+          }
+          return messageGenerator();
+        });
+        let stopReason: string | undefined;
+        void agent
+          .prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "explore" }] })
+          .then((response) => (stopReason = response.stopReason));
+        await vi.waitFor(() => expect(ended).toBe(true));
+        await vi.advanceTimersByTimeAsync(10);
+        // A followup may still be about to start: no answer straight away.
+        expect(stopReason).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(HELD_TURN_DRAIN_GRACE_MS);
+        expect(stopReason).toBe("end_turn");
+        release();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("answers after the grace when only the level signal follows the turn's only idle", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const agent = createMockAgent();
+        let release!: () => void;
+        const parked = new Promise<void>((resolve) => (release = resolve));
+        let ended = false;
+        injectGeneratorSession(agent, (input) => {
+          async function* messageGenerator() {
+            const iter = input[Symbol.asyncIterator]();
+            const { value: userMessage } = await iter.next();
+            yield userEcho(userMessage);
+            yield running();
+            yield subagentStarted("agent-1");
+            yield resultMessage();
+            yield idle();
+            yield backgroundTasksChanged([]);
+            ended = true;
+            await parked;
+          }
+          return messageGenerator();
+        });
+        let stopReason: string | undefined;
+        void agent
+          .prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "explore" }] })
+          .then((response) => (stopReason = response.stopReason));
+        await vi.waitFor(() => expect(ended).toBe(true));
+        await vi.advanceTimersByTimeAsync(HELD_TURN_DRAIN_GRACE_MS + 10);
+        expect(stopReason).toBe("end_turn");
+        release();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps holding while the subagent is still live, however long", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const agent = createMockAgent();
+        let release!: () => void;
+        const parked = new Promise<void>((resolve) => (release = resolve));
+        let idled = false;
+        injectGeneratorSession(agent, (input) => {
+          async function* messageGenerator() {
+            const iter = input[Symbol.asyncIterator]();
+            const { value: userMessage } = await iter.next();
+            yield userEcho(userMessage);
+            yield running();
+            yield subagentStarted("agent-1");
+            yield resultMessage();
+            yield idle();
+            idled = true;
+            await parked;
+          }
+          return messageGenerator();
+        });
+        let stopReason: string | undefined;
+        void agent
+          .prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "explore" }] })
+          .then((response) => (stopReason = response.stopReason));
+        await vi.waitFor(() => expect(idled).toBe(true));
+        await vi.advanceTimersByTimeAsync(HELD_TURN_DRAIN_GRACE_MS * 4);
+        expect(stopReason).toBeUndefined();
+        release();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not answer early when a followup starts within the grace", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const { agent, events } = chunkCapturingAgent();
+        let wake!: () => void;
+        const woken = new Promise<void>((resolve) => (wake = resolve));
+        let ended = false;
+        injectGeneratorSession(agent, (input) => {
+          async function* messageGenerator() {
+            const iter = input[Symbol.asyncIterator]();
+            const { value: userMessage } = await iter.next();
+            yield userEcho(userMessage);
+            yield running();
+            yield subagentStarted("agent-1");
+            yield resultMessage();
+            yield idle();
+            yield subagentEnded("agent-1");
+            ended = true;
+            await woken;
+            yield taskNotification("agent-1");
+            yield running();
+            yield assistantText("promised summary");
+            yield resultMessage();
+            yield idle();
+          }
+          return messageGenerator();
+        });
+        let stopReason: string | undefined;
+        void agent
+          .prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "explore" }] })
+          .then((response) => {
+            stopReason = response.stopReason;
+            events.push("settled");
+          });
+        await vi.waitFor(() => expect(ended).toBe(true));
+        await vi.advanceTimersByTimeAsync(HELD_TURN_DRAIN_GRACE_MS / 2);
+        wake();
+        await vi.waitFor(() => expect(stopReason).toBe("end_turn"));
+        // The followup's summary landed inside the turn, before it settled.
+        expect(events).toEqual(["chunk:promised summary", "settled"]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it("publishes the non-ambient background set, past the turn, only on change", async () => {

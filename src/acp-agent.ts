@@ -458,6 +458,15 @@ export const USAGE_CAPABILITY_VERSION = 1;
  *  showed them. */
 export const USAGE_REFRESH_MAX_SAMPLE_AGE_MS = 5_000;
 
+/** Parity item 106 (upstream issue #1284): how long a turn held for its
+ *  background subagents (see `Turn.deferredSettle`) waits, once none of them is
+ *  live and Claude Code is idle, for the followup cycle a task_notification
+ *  would start. A notification that is lost starts none, and with no further
+ *  idle nothing else would ever answer the prompt. A followup starts within
+ *  milliseconds of its notification (the CLI flushes them together), so the
+ *  bound only ever expires on a lost one. */
+export const HELD_TURN_DRAIN_GRACE_MS = 5_000;
+
 export type UsageRefreshRequest = { sessionId: string };
 export type UsageRefreshResponse = { refreshed: boolean };
 
@@ -641,16 +650,20 @@ type Turn = {
    *  cancel or the next turn's echo hand-off settles it earlier, so a
    *  long-running subagent never holds the prompt hostage.
    *
-   *  Accepted residuals. (1) A subagent that ends WITHOUT waking the model —
-   *  its task_notification lost or skipped (only the terminal task_updated
-   *  patch is guaranteed per transition) — leaves no followup result and no
-   *  further idle, so the held turn parks until `session/cancel` or the next
-   *  prompt (either settles it: the echo hand-off or ensureActiveTurn's
-   *  held-turn hand-off). Settling at the prune sites instead would preempt
-   *  the followup summary in the normal ordering (prunes precede the
-   *  notification), and a grace timer was judged not worth the machinery —
-   *  the same rescue contract as the adapter's other wedge classes (issue
-   *  #825's out-of-scope notes). (2) Drained-ness is judged by live-task
+   *  A subagent that ends WITHOUT waking the model — its task_notification
+   *  lost or skipped (only the terminal task_updated patch is guaranteed per
+   *  transition) — leaves no followup result, and when its end comes after
+   *  the turn's only idle, no further idle either. Settling at the prune
+   *  sites would preempt the followup summary in the normal ordering (prunes
+   *  precede the notification), so a prune that drains the turn while Claude
+   *  Code is idle arms a bounded grace instead (`HELD_TURN_DRAIN_GRACE_MS`,
+   *  parity item 106, upstream issue #1284); it settles only if no followup
+   *  started meanwhile. A subagent whose every end signal is lost — the
+   *  bookends AND the `background_tasks_changed` level — is indistinguishable
+   *  from a live one and still parks the turn until `session/cancel` or the
+   *  next prompt.
+   *
+   *  Accepted residual: drained-ness is judged by live-task
    *  membership only: with parallel subagents, a notification that prunes
    *  the last task during an earlier task's still-streaming followup lets
    *  that followup's result settle the turn before the LAST task's summary
@@ -3804,6 +3817,40 @@ export class ClaudeAcpAgent {
       }
     };
 
+    /** Item 106: arms the drain grace (see `HELD_TURN_DRAIN_GRACE_MS`) when a
+     *  prune leaves the held turn with no live subagent while Claude Code is
+     *  idle — the state in which a lost task_notification parks the turn. At
+     *  expiry the turn settles only if nothing moved: same turn, still held,
+     *  still drained, still idle. A followup that started meanwhile (state
+     *  `running`) settles the turn itself at its result or idle. */
+    let drainGrace: ReturnType<typeof setTimeout> | undefined;
+    const armDrainGrace = () => {
+      const turn = session.activeTurn;
+      if (
+        drainGrace !== undefined ||
+        !isHeldOpen(turn) ||
+        turnAwaitingSubagents(turn) ||
+        session.lastSessionState !== "idle"
+      ) {
+        return;
+      }
+      drainGrace = setTimeout(() => {
+        drainGrace = undefined;
+        if (
+          session.activeTurn === turn &&
+          isHeldOpen(turn) &&
+          !turnAwaitingSubagents(turn) &&
+          session.lastSessionState === "idle"
+        ) {
+          this.logger.log(
+            `[held-turn] settled after the drain grace: no followup came (task_notification lost?) session=${params.sessionId}`,
+          );
+          settleDeferredIfDrained();
+        }
+      }, HELD_TURN_DRAIN_GRACE_MS);
+      drainGrace.unref?.();
+    };
+
     /** Settle the active turn with `outcome` now — unless subagents it
      *  spawned are still live, in which case store the outcome and hold the
      *  turn open (see Turn.deferredSettle). Every result-time settle of a
@@ -4839,6 +4886,7 @@ export class ClaudeAcpAgent {
                   message.task_id,
                   backgroundExitCode(message.status, message.summary),
                 );
+                armDrainGrace();
                 if (session.taskFeed && session.taskFeedPublisher) {
                   const readable = await endingOutputReadable(
                     session,
@@ -4870,6 +4918,7 @@ export class ClaudeAcpAgent {
                     message.task_id,
                     backgroundExitCode(message.patch.status, message.patch.error),
                   );
+                  armDrainGrace();
                 }
                 if (session.taskFeed && session.taskFeedPublisher) {
                   // The CLI queues the terminal patch BEFORE the
@@ -5082,6 +5131,7 @@ export class ClaudeAcpAgent {
                       session.liveBackgroundTasks.delete(taskId);
                     }
                   }
+                  armDrainGrace();
                 }
                 // The same level, forwarded: once the turn has settled the
                 // client reads the thread as idle, and a background shell or
