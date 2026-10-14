@@ -3262,6 +3262,92 @@ describe("structured tool_use_result rendering (Read/Bash/WebSearch)", () => {
         data: "clipped stdout\n[Output truncated (38100 bytes total): full output saved to /tmp/tool-results/abc.txt]",
       });
     });
+
+    // Parity item 92 (upstream #1252, #1312): the exit code is the one the
+    // result names, never an invented one where a real one is readable.
+    describe("exit code (item 92)", () => {
+      const exitOf = (update: ReturnType<typeof toolUpdateFromToolResult>) =>
+        update._meta?.terminal_exit?.exit_code;
+
+      it("reads the code a failed command's text names", () => {
+        const update = toolUpdateFromToolResult(
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_bash",
+            content: "Exit code 2\nboom",
+            is_error: true,
+          },
+          bashToolUse,
+          true,
+        );
+        expect(exitOf(update)).toBe(2);
+        expect(update._meta?.terminal_output?.data).toBe("Exit code 2\nboom");
+      });
+
+      it("reads the code from an array result too", () => {
+        const update = toolUpdateFromToolResult(
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_bash",
+            content: [{ type: "text", text: "Exit code 127\nsh: nope: not found" }],
+            is_error: true,
+          },
+          bashToolUse,
+          true,
+        );
+        expect(exitOf(update)).toBe(127);
+      });
+
+      it("keeps 1 for a failure that names no code (a denial), never null", () => {
+        const update = toolUpdateFromToolResult(
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_bash",
+            content: "Permission to use Bash has been denied.",
+            is_error: true,
+          },
+          bashToolUse,
+          true,
+        );
+        expect(exitOf(update)).toBe(1);
+      });
+
+      it("does not read a code that is not at the start of the text", () => {
+        const update = toolUpdateFromToolResult(
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_bash",
+            content: "boom\nExit code 9",
+            is_error: true,
+          },
+          bashToolUse,
+          true,
+        );
+        expect(exitOf(update)).toBe(1);
+      });
+
+      it("reports no code for a command sent to the background (it still runs)", () => {
+        const update = toolUpdateFromToolResult(rawWithHint, bashToolUse, true, {
+          ...structured,
+          stdout: "",
+          backgroundTaskId: "bash_1",
+        });
+        expect(update._meta?.terminal_exit).toEqual({
+          terminal_id: "toolu_bash",
+          exit_code: null,
+          signal: null,
+        });
+      });
+
+      it("reports no code for a non-zero code Claude Code accepted as a success", () => {
+        const update = toolUpdateFromToolResult(rawWithHint, bashToolUse, true, {
+          ...structured,
+          stdout: "",
+          returnCodeInterpretation: "No matches found",
+        });
+        expect(exitOf(update)).toBeNull();
+      });
+    });
   });
 
   describe("WebSearch", () => {

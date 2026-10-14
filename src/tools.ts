@@ -108,7 +108,8 @@ interface ToolUpdate {
     };
     terminal_exit?: {
       terminal_id: string;
-      exit_code: number;
+      /** Null when the code is not known (as in `TerminalExitStatus`). */
+      exit_code: number | null;
       signal: string | null;
     };
   };
@@ -735,7 +736,13 @@ export function toolUpdateFromToolResult(
       //    or [{ type: "image", source: {...} }] when the local Bash tool
       //    produces an image, e.g. piping a base64 data URI)
       let output = "";
-      let exitCode = isError ? 1 : 0;
+      // Parity item 92 (upstream #1252): the code is the one the result names.
+      // `null` means "not known" — `TerminalExitStatus` allows it — and is used
+      // only where the command did NOT fail: a client such as Zeo marks a
+      // command failed only on a non-null, non-zero code, so a known failure
+      // keeps a number (the `Exit code N` the text names, else 1).
+      let exitCode: number | null = isError ? 1 : 0;
+      let codeFromResult = false;
 
       const structuredBash = structuredResult<BashOutput>(toolUseResult);
       if (
@@ -754,6 +761,10 @@ export function toolUpdateFromToolResult(
         if (structuredBash.interrupted) {
           output = [output, "[Command was aborted before completion]"].filter(Boolean).join("\n");
           exitCode = 1;
+        } else if (structuredBash.returnCodeInterpretation !== undefined && !isError) {
+          // Claude Code accepted a non-zero code as a success (grep's "No
+          // matches found"); the result does not carry which code it was.
+          exitCode = null;
         }
         // Structured stdout is clipped (~30k chars) when the full output was
         // persisted to disk; without this note the clip is silent and the
@@ -779,6 +790,7 @@ export function toolUpdateFromToolResult(
         const bashResult = result as BetaBashCodeExecutionResultBlock;
         output = [bashResult.stdout, bashResult.stderr].filter(Boolean).join("\n");
         exitCode = bashResult.return_code;
+        codeFromResult = true;
       } else if (typeof result === "string") {
         output = result;
       } else if (Array.isArray(result) && result.length > 0) {
@@ -796,6 +808,12 @@ export function toolUpdateFromToolResult(
           return toAcpContentUpdate(result, isError);
         }
       }
+
+      if (isError && !codeFromResult) exitCode = failureExitCode(output) ?? 1;
+      // A command sent to the background is still running: the result only
+      // announces it. The consumer withholds this exit while the task is live
+      // and sends the real one when the task ends (`backgroundTerminals`).
+      if (structuredBash?.backgroundTaskId !== undefined) exitCode = null;
 
       // Without a terminal id there is nothing the client can reconcile these
       // metas against, and emitting them anyway strands the output: a client that
@@ -1049,6 +1067,16 @@ export type ClaudePlanEntry = {
   status: "pending" | "in_progress" | "completed";
   activeForm: string;
 };
+
+/**
+ * The exit code the text of a failed command names. Claude Code starts the text
+ * of a command that exited with a failing code with `Exit code N`; other
+ * failures, such as a denial or a command that could not start, name none.
+ */
+export function failureExitCode(text: string): number | undefined {
+  const match = /^Exit code (\d+)(?:\n|$)/.exec(text);
+  return match ? Number(match[1]) : undefined;
+}
 
 export function planEntries(input: { todos: ClaudePlanEntry[] } | undefined): PlanEntry[] {
   return (input?.todos ?? []).map((todo) => ({
