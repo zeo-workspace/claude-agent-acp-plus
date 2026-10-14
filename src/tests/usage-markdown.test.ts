@@ -141,6 +141,63 @@ describe("usage Markdown - parsing and rendering", () => {
     expect(formatted).not.toContain("lowest");
   });
 
+  // Parity item 100: the report's `behaviors[]` (usage patterns) used to be
+  // dropped. Every key the pinned SDK types define renders with a label, and a
+  // key a newer CLI adds renders from its own name, with no code change.
+  describe("usage patterns (item 100)", () => {
+    const withBehaviors = (behaviors: unknown[]) =>
+      formatUsageResponse({
+        ...usageResponse,
+        behaviors: {
+          ...(usageResponse as any).behaviors,
+          week: { ...(usageResponse as any).behaviors.week, behaviors },
+        },
+      } as unknown as SDKControlGetUsageResponse);
+
+    it("renders every behavior key the SDK types define", () => {
+      const formatted = withBehaviors([
+        { key: "cache_miss", pct: 41, count: 12 },
+        { key: "long_context", pct: 22, count: 9 },
+        { key: "subagent_heavy", pct: 18, count: 7 },
+        { key: "high_parallel", pct: 12, count: 4 },
+        { key: "cron", pct: 5, count: 2 },
+      ]);
+      expect(formatted).toContain("| Usage pattern | Usage | Requests |");
+      expect(formatted).toMatch(/\| Hit a >100k-token cache miss \| `[█░]{20}` 41% \| 12 \|/);
+      expect(formatted).toContain("| At >150k context |");
+      expect(formatted).toContain("| Subagent-heavy sessions |");
+      expect(formatted).toContain("| While 4+ sessions ran in parallel |");
+      expect(formatted).toContain("| Sessions active for 8+ hours |");
+    });
+
+    it("passes a key the pinned SDK does not know through, from its own name", () => {
+      const formatted = withBehaviors([
+        { key: "max_effort", pct: 30, count: 3 },
+        { key: "large_tool_results", pct: 11, count: 1 },
+      ]);
+      expect(formatted).toContain("| Max effort |");
+      expect(formatted).toContain("| Large tool results |");
+    });
+
+    it("ranks by share, skips empty and malformed entries, and escapes names", () => {
+      const formatted = withBehaviors([
+        { key: "cron", pct: 0, count: 0 },
+        { key: "pipe|key", pct: 9, count: 1 },
+        { key: "long_context", pct: 50, count: 5 },
+        { key: 7, pct: 10, count: 1 },
+        { key: "cache_miss", pct: "lots", count: 1 },
+      ]);
+      expect(formatted).not.toContain("Sessions active for 8+ hours");
+      expect(formatted).toContain("Pipe\\|key");
+      expect(formatted.indexOf("At >150k context")).toBeLessThan(formatted.indexOf("Pipe\\|key"));
+      expect(formatted).not.toContain("cache miss");
+    });
+
+    it("renders no pattern table when the period has none", () => {
+      expect(formatUsageResponse(usageResponse)).not.toContain("Usage pattern");
+    });
+  });
+
   it("omits the limits section when every utilization is unavailable", () => {
     const formatted = formatUsageResponse({
       ...usageResponse,

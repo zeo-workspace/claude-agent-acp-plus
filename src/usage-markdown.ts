@@ -266,6 +266,53 @@ function appendLimit(
 /** How many MCP servers one contribution table lists. */
 const TOP_CONTRIBUTIONS = 3;
 
+/**
+ * Labels for the usage patterns (`behaviors[].key`) the pinned SDK types
+ * define, worded as Claude Code's own `/usage` dialog words them (CLI 2.1.285:
+ * "41% of your usage hit a >100k-token cache miss"). A key not listed here — a
+ * newer CLI adds them ahead of the SDK types — renders from its own name, so it
+ * shows without a code change.
+ */
+const BEHAVIOR_LABELS: Record<string, string> = {
+  cache_miss: "Hit a >100k-token cache miss",
+  long_context: "At >150k context",
+  subagent_heavy: "Subagent-heavy sessions",
+  high_parallel: "While 4+ sessions ran in parallel",
+  cron: "Sessions active for 8+ hours",
+};
+
+/** `max_effort` -> "Max effort", escaped: the key is the CLI's, not ours. */
+function behaviorLabel(key: string): string {
+  const known = BEHAVIOR_LABELS[key];
+  if (known !== undefined) return known;
+  const words = key.replace(/_+/g, " ").trim();
+  return escapeMarkdown(words.charAt(0).toUpperCase() + words.slice(1));
+}
+
+/**
+ * A period's usage patterns, read defensively: the schema does not validate
+ * `behaviors[]`, so a report from a CLI that reshaped it still renders
+ * everything else. An entry with no usable key or share is skipped, and so is
+ * one with no share at all — the CLI sends every pattern it knows, most at 0%.
+ */
+function readBehaviors(period: unknown): { key: string; pct: number; count: number | null }[] {
+  const raw = (period as { behaviors?: unknown } | null)?.behaviors;
+  if (!Array.isArray(raw)) return [];
+  const rows: { key: string; pct: number; count: number | null }[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { key, pct, count } = entry as { key?: unknown; pct?: unknown; count?: unknown };
+    if (typeof key !== "string" || key.trim() === "") continue;
+    if (typeof pct !== "number" || !Number.isFinite(pct) || pct <= 0) continue;
+    rows.push({
+      key,
+      pct,
+      count: typeof count === "number" && Number.isFinite(count) && count >= 0 ? count : null,
+    });
+  }
+  return rows.sort((a, b) => b.pct - a.pct);
+}
+
 function appendContributions(
   lines: string[],
   label: string,
@@ -279,6 +326,16 @@ function appendContributions(
     "",
     `**${label}** \u00b7 ${period.request_count} requests \u00b7 ${period.session_count} sessions`,
   );
+  const behaviors = readBehaviors(period);
+  if (behaviors.length > 0) {
+    lines.push("", "| Usage pattern | Usage | Requests |", "|:--|--:|--:|");
+    for (const behavior of behaviors) {
+      const bar = usageBar(normalizeUtilization(behavior.pct) ?? 0);
+      lines.push(
+        `| ${behaviorLabel(behavior.key)} | \`${bar}\` ${behavior.pct}% | ${behavior.count ?? "\u2014"} |`,
+      );
+    }
+  }
   if (period.mcp_servers.length === 0) {
     return;
   }
