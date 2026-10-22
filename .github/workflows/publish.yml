@@ -3,6 +3,16 @@ on:
   push:
     branches:
       - main
+  # Recovery path for a release that release-please created but whose run died
+  # before setting `release_created` (2026-10-22, a GitHub GraphQL incident took
+  # two claude-agent-tui releases this way). That output is never set again for an
+  # existing tag, so without this the bundle the overlay ebuild fetches is lost.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag (vX.Y.Z): attach its bundle and publish it to npm, skipping whichever already exists"
+        required: true
+        type: string
 
 # Default to no permissions; each job requests exactly what it needs.
 permissions: {}
@@ -47,18 +57,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [release-please]
-    if: ${{ needs.release-please.outputs.release_created }}
+    # !cancelled(): a dispatch must not depend on release-please, the job that failed.
+    if: ${{ !cancelled() && (needs.release-please.outputs.release_created || github.event_name == 'workflow_dispatch') }}
     permissions:
       contents: write # gh release upload
     env:
-      TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+      TAG_NAME: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
+      # The tag reaches only env and the checkout ref, never a shell line, and must
+      # name a release that already exists: this job attaches, it never creates.
+      - name: Validate the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "${TAG_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::invalid tag '${TAG_NAME}'"; exit 1; }
+          gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" --json tagName > /dev/null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ env.TAG_NAME }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "lts/*"
@@ -72,6 +91,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           version="${TAG_NAME#v}"
+          asset="claude-agent-acp-plus-${version}-bundle.tar.gz"
+          if gh release view "$TAG_NAME" --json assets -q '.assets[].name' | grep -qxF "$asset"; then
+            echo "::notice::$asset is already attached to $TAG_NAME; nothing to do"
+            exit 0
+          fi
           stage="$(mktemp -d)"
           cp package.json package-lock.json README.md LICENSE "$stage/"
           cp -r dist "$stage/dist"
@@ -85,24 +109,48 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [release-please]
-    if: ${{ needs.release-please.outputs.release_created }}
+    if: ${{ !cancelled() && (needs.release-please.outputs.release_created || github.event_name == 'workflow_dispatch') }}
     environment: release # Optional: for enhanced security
     permissions:
       contents: read
       id-token: write
+    env:
+      TAG_NAME: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
+      - name: Validate the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "${TAG_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::invalid tag '${TAG_NAME}'"; exit 1; }
+          gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" --json tagName > /dev/null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          # Publish the tagged commit, not the dispatching branch's head.
+          ref: ${{ env.TAG_NAME }}
       # Setup .npmrc file to publish to npm
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "lts/*"
           registry-url: "https://registry.npmjs.org"
-      - run: npm ci
-      - run: npm run build
+      # npm refuses a version twice; checking first lets a recovery dispatch
+      # re-run this job after the version already went out.
+      - name: Check whether this version is already on npm
+        id: published
+        run: |
+          spec="$(node -p 'const p = require("./package.json"); p.name + "@" + p.version')"
+          if npm view "$spec" version > /dev/null 2>&1; then
+            echo "::notice::$spec is already on npm; skipping publish"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: ${{ steps.published.outputs.skip != 'true' }}
+        run: npm ci
+      - if: ${{ steps.published.outputs.skip != 'true' }}
+        run: npm run build
       # Provenance attestation via OIDC (trusted publishing); runner's LTS npm
       # is recent enough — installing an unpinned npm@latest at publish time
       # would itself be a supply-chain exposure.
-      - run: npm publish --provenance
+      - if: ${{ steps.published.outputs.skip != 'true' }}
+        run: npm publish --provenance
