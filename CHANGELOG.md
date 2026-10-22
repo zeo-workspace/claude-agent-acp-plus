@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.30.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.30.0...v0.30.1) (2026-10-22)
+
+
+### Miscellaneous Chores
+
+* **deps:** bump the actions group with 4 updates ([0e0c04c](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/0e0c04c897bbca7793057f3e8f1b301af353c183))
+* **deps:** bump the minor group across 1 directory with 41 updates ([8a3adfb](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/8a3adfb92f03fbe9e1d7f8286bd6e320f6b2c4e4))
+
 ## [0.30.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.29.0...v0.30.0) (2026-10-14)
 
 
