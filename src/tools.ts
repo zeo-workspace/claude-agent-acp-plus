@@ -1555,6 +1555,12 @@ export const registerHookCallback = (
   };
 };
 
+/* Drops a tool's callbacks when no PostToolUse hook will come for it: a server tool, such as
+   the advisor, settles from its result in assistant content (upstream #1247). */
+export function unregisterHookCallback(toolUseID: string): void {
+  delete toolUseCallbacks[toolUseID];
+}
+
 /* A callback for Claude Code that is called when receiving a PostToolUse hook */
 export const createPostToolUseHook =
   (options?: { onEnterPlanMode?: () => Promise<void> }): HookCallback =>
