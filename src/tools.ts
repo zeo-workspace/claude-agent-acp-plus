@@ -518,6 +518,11 @@ export function toolInfoFromToolUse(
       };
     }
 
+    // EnterPlanMode switches the session to plan mode, so it has the `switch_mode` kind like
+    // ExitPlanMode (upstream #1467, agentclientprotocol/agent-client-protocol#2543).
+    case "EnterPlanMode":
+      return { title: "EnterPlanMode", kind: "switch_mode", content: [] };
+
     case "ExitPlanMode": {
       const planInput = toolUse.input as { plan?: string } | undefined;
       return {
