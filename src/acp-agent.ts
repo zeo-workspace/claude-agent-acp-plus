@@ -78,6 +78,7 @@ import {
   SDKMessage,
   SDKMessageOrigin,
   SDKPartialAssistantMessage,
+  SDKSystemMessage,
   SDKUserMessage,
   SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -202,6 +203,7 @@ import {
   normalizeNoticeText,
   noticeOrTranscriptUpdate,
   sentenceCase,
+  type SessionNotice,
   splitNoticeText,
 } from "./session-notices.js";
 import {
@@ -869,6 +871,10 @@ export type Session = {
   /** Serialized `system`/init `plugin_errors` last logged, so the per-turn
    *  init re-emit logs a plugin load failure once, not every turn. */
   loggedPluginErrors?: string;
+  /** Names of client-provided MCP servers already reported as failed or
+   *  needing authentication. `system`/init re-emits on every turn with the
+   *  same statuses, and each server is reported once per session. */
+  reportedMcpServers?: Set<string>;
   /** The long-lived consumer task. Lazily started on the first `prompt()` and
    *  kept alive for the session so between-turn/background messages are still
    *  drained and forwarded. */
@@ -3128,6 +3134,50 @@ export class ClaudeAcpAgent {
     return { refreshed };
   }
 
+  /** Upstream #1464: a session notice when a client-provided MCP server reports `failed` or
+   *  `needs-auth` at init, once per server per session. Plus has no MCP OAuth flow, so a
+   *  `needs-auth` server is always reported; its tools stay unavailable until it is authenticated. */
+  private async reportMcpServerStartupFailures(
+    session: Session,
+    servers: SDKSystemMessage["mcp_servers"] | undefined,
+    supportsNotices: boolean,
+    sendUpdate: (notification: SessionNotification) => Promise<void>,
+    sessionId: string,
+  ): Promise<void> {
+    if (!servers?.length) return;
+    const clientServers = new Set(
+      (session.creationParams?.mcpServers ?? []).map((server) => server.name),
+    );
+    for (const server of servers) {
+      if (!clientServers.has(server.name) || session.reportedMcpServers?.has(server.name)) {
+        continue;
+      }
+      let notice: SessionNotice;
+      if (server.status === "failed") {
+        notice = {
+          severity: "warning",
+          title: `MCP server "${server.name}" failed to start`,
+          description: "Its tools are unavailable in this session. Run /mcp for the error.",
+        };
+      } else if (server.status === "needs-auth") {
+        notice = {
+          severity: "info",
+          title: `MCP server "${server.name}" needs authentication`,
+          description: "Its tools are unavailable until the server is authenticated.",
+        };
+      } else {
+        continue;
+      }
+      (session.reportedMcpServers ??= new Set()).add(server.name);
+      await sendUpdate({
+        sessionId,
+        update: noticeOrTranscriptUpdate(notice, supportsNotices, undefined, {
+          claudeCode: { kind: "mcpServerStatus", server: server.name, status: server.status },
+        }),
+      });
+    }
+  }
+
   private async publishGoalFromPrompt(
     sessionId: string,
     prompt: string,
@@ -4646,6 +4696,13 @@ export class ClaudeAcpAgent {
                     }
                   }
                 }
+                await this.reportMcpServerStartupFailures(
+                  session,
+                  message.mcp_servers,
+                  supportsNotices,
+                  sendUpdate,
+                  params.sessionId,
+                );
                 break;
               case "status": {
                 // Compaction is reported as ONE tool lifecycle rather than the
