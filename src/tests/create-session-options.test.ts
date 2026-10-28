@@ -664,6 +664,56 @@ describe("createSession options merging", () => {
       expect(capturedOptions!.disallowedTools).toContain("WebSearch");
       expect(capturedOptions!.disallowedTools).not.toContain("AskUserQuestion");
     });
+
+    // Upstream #1465: MCP's `decline` means the user refused. A request the user never saw is
+    // a `cancel` -- the client answered with an error, or did not advertise the mode.
+    type OnElicitation = NonNullable<Options["onElicitation"]>;
+    const signal = { signal: new AbortController().signal } as Parameters<OnElicitation>[1];
+
+    it("answers an MCP form elicitation with cancel when the client rejects it", async () => {
+      agent = new ClaudeAcpAgent({
+        ...createMockClient(),
+        createElicitation: async () => {
+          throw RequestError.invalidParams(undefined, "Cannot render this form");
+        },
+      } as unknown as AcpClient);
+      await agent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: { elicitation: { form: {} } },
+      });
+      await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
+
+      const answer = await capturedOptions!.onElicitation!(
+        {
+          serverName: "linear",
+          message: "Which team?",
+          mode: "form",
+          requestedSchema: { type: "object", properties: { team: { type: "string" } } },
+        },
+        signal,
+      );
+      expect(answer).toEqual({ action: "cancel" });
+    });
+
+    it("answers an MCP URL elicitation with cancel when the client supports only forms", async () => {
+      await agent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: { elicitation: { form: {} } },
+      });
+      await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
+
+      const answer = await capturedOptions!.onElicitation!(
+        {
+          serverName: "linear",
+          message: "Sign in",
+          mode: "url",
+          url: "https://linear.app/oauth",
+          elicitationId: "e1",
+        },
+        signal,
+      );
+      expect(answer).toEqual({ action: "cancel" });
+    });
   });
 
   describe("permission mode of a resumed session (upstream #1218)", () => {
