@@ -1167,6 +1167,11 @@ export type Session = {
     {
       parentToolUseId?: string;
       isSubagent: boolean;
+      /** Upstream #1466: where the task runs, from `task_started.is_backgrounded` and later
+       *  `task_updated` patches, and the task that launched it. Together they answer
+       *  `blocksForeground`: a cancelled permission request of background work is a denial. */
+      backgrounded?: boolean;
+      parentTaskId?: string;
       /** Absent-from-level lifecycle, one field so the illegal
        *  armed-but-not-ended state is unrepresentable: undefined = live per
        *  the level signal; "ended" = a level omitted the task (holds stop
@@ -1653,6 +1658,21 @@ function childLaunchOf(
     // live launch advertises what the SDK can stop (design.md, Security).
     cancellable: false,
   };
+}
+
+/** Whether a permission request from `agentID` belongs to work that blocks the turn: the main
+ *  thread (no agent id), a foreground subagent, or a subagent launched by one. A task this
+ *  session never registered is not foreground work (upstream #1466, `blocksForeground`). */
+function blocksForeground(session: Session, agentID: string | undefined): boolean {
+  const seen = new Set<string>();
+  for (let id = agentID; id !== undefined && !seen.has(id);) {
+    seen.add(id);
+    const task = session.liveBackgroundTasks.get(id);
+    if (!task) return false;
+    if (task.backgrounded) return false;
+    id = task.parentTaskId;
+  }
+  return true;
 }
 
 /** The text of a user message whose content is a string or one text block. */
@@ -5140,6 +5160,10 @@ export class ClaudeAcpAgent {
                 session.liveBackgroundTasks.set(message.task_id, {
                   parentToolUseId: message.tool_use_id,
                   isSubagent: !!message.subagent_type,
+                  ...(message.is_backgrounded !== undefined
+                    ? { backgrounded: message.is_backgrounded }
+                    : {}),
+                  ...(message.parent_task_id ? { parentTaskId: message.parent_task_id } : {}),
                 });
                 if (message.subagent_type && session.activeTurn && !session.activeTurn.settled) {
                   (session.activeTurn.spawnedTaskIds ??= new Set()).add(message.task_id);
@@ -5195,6 +5219,11 @@ export class ClaudeAcpAgent {
                     `[task/late-run] dropped=task_updated task=${message.task_id} run=${message.run_id}`,
                   );
                   break;
+                }
+                // A task moved to the background no longer blocks the foreground (#1466).
+                if (message.patch.is_backgrounded !== undefined) {
+                  const task = session.liveBackgroundTasks.get(message.task_id);
+                  if (task) task.backgrounded = message.patch.is_backgrounded;
                 }
                 // terminal-status task_updated patch and a (deduplicated)
                 // task_notification when a task settles, but only the patch is
@@ -8115,6 +8144,23 @@ export class ClaudeAcpAgent {
         throw error;
       }
       if (signal.aborted) throw new Error("Tool use aborted");
+      // On `session/cancel` the client answers every open permission request
+      // `cancelled`, including those of a background subagent, which the
+      // cancel does not stop. Answer such a request with a denial so the
+      // subagent reads "the user refused" and goes on. Throwing instead makes
+      // Claude Code deny it as "Tool permission request failed".
+      if (
+        response.outcome?.outcome === "cancelled" &&
+        this.sessions[sessionId] === session &&
+        !blocksForeground(session, agentID)
+      ) {
+        return {
+          behavior: "deny",
+          message: "User refused permission to run tool",
+          toolUseID,
+          decisionClassification: "user_reject",
+        };
+      }
       const decodedPermission = decodeClaudePermissionResponse(
         response,
         toolName,

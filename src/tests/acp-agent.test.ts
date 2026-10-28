@@ -2736,6 +2736,57 @@ describe("permission request cancellation", () => {
     return agent.sessions[sessionId]!;
   }
 
+  // Upstream #1466: a cancelled outcome denies background work instead of aborting it.
+  describe("a cancelled outcome", () => {
+    function setup() {
+      const mockClient = {
+        sessionUpdate: async () => {},
+        requestPermission: async (): Promise<RequestPermissionResponse> => ({
+          outcome: { outcome: "cancelled" },
+        }),
+      } as unknown as AcpClient;
+      const agent = new ClaudeAcpAgent(mockClient, { log: () => {}, error: () => {} });
+      const session = injectSession(agent, "session-1");
+      session.emittedToolCalls.add("tool-1");
+      const ask = (agentID?: string) =>
+        agent.canUseTool("session-1")("Bash", { command: "ls" }, {
+          signal: new AbortController().signal,
+          suggestions: [],
+          toolUseID: "tool-1",
+          ...(agentID ? { agentID } : {}),
+        } as any);
+      return { session, ask };
+    }
+
+    it("aborts the tool use of foreground work", async () => {
+      const { session, ask } = setup();
+      // A subagent that runs in the foreground blocks the turn like the main thread.
+      session.liveBackgroundTasks.set("agent-fg", { isSubagent: true });
+
+      await expect(ask()).rejects.toThrow("Tool use aborted");
+      await expect(ask("agent-fg")).rejects.toThrow("Tool use aborted");
+    });
+
+    it("denies the tool use of a background subagent", async () => {
+      const { session, ask } = setup();
+      session.liveBackgroundTasks.set("agent-bg", { isSubagent: true, backgrounded: true });
+      // A subagent that a background subagent started is background work too.
+      session.liveBackgroundTasks.set("agent-nested", {
+        isSubagent: true,
+        parentTaskId: "agent-bg",
+      });
+
+      for (const agentID of ["agent-bg", "agent-nested"]) {
+        await expect(ask(agentID)).resolves.toEqual({
+          behavior: "deny",
+          message: "User refused permission to run tool",
+          toolUseID: "tool-1",
+          decisionClassification: "user_reject",
+        });
+      }
+    });
+  });
+
   it("forwards the tool-call signal so a pending permission request is cancelled on abort", async () => {
     let receivedSignal: AbortSignal | undefined;
     const mockClient = {
