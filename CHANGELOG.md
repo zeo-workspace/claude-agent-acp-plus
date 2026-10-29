@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.31.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.30.1...v0.31.0) (2026-10-29)
+
+
+### Features
+
+* **062:** fast-mode overage refused turns fast off and says so ([fc11943](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/fc1194317d328374e1efd3e9ef7f6b7d01b5eebd))
+* **062:** offer Plan updates, so Zed's plan view fills on current models ([941b13d](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/941b13d4b56a4fe368a459885904a0b6a212d0d8))
+* **062:** titles at prompt time, and fork titles without the effort ([7370a98](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/7370a984557ed0f9bcd5704ac4020c7121745b66))
+
+
+### Bug Fixes
+
+* **062:** delete and changed resume survive a never-prompted session ([79612ad](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/79612ad5f0e5f97a28d9f50445cfd3202e1fcc4f))
+
+
+### Miscellaneous Chores
+
+* **062:** release claude-agent-acp-plus 0.31.0 ([439ec55](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/439ec55256c334966177fef2022d8208730dd69e))
+
 ## [0.30.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.30.0...v0.30.1) (2026-10-22)
 
 
