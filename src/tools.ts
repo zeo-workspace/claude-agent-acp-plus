@@ -216,9 +216,14 @@ export function toolInfoFromToolUse(
     case "Agent":
     case "Task": {
       const input = toolUse.input as AgentInput | BashInput | undefined;
-      // `effort` is set only when the user asked for one (CLI 2.1.292+).
+      // `effort` is set only when the user asked for one (CLI 2.1.292+). A
+      // `subagent_type: "fork"` child ignores it and runs at the parent's
+      // effort (upstream #1384).
       const effort =
-        input && "effort" in input && typeof input.effort === "string"
+        input &&
+        "effort" in input &&
+        typeof input.effort === "string" &&
+        !("subagent_type" in input && input.subagent_type === "fork")
           ? ` (${input.effort} effort)`
           : "";
       return {

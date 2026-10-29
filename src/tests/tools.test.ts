@@ -3694,3 +3694,29 @@ describe("standard `name` on tool_call notifications", () => {
     expect((notifications[0]?.update as any).name).toBeUndefined();
   });
 });
+
+// Story 062, R4.3 (upstream 2dab922, #1384): a `subagent_type: "fork"` child
+// ignores `effort` and runs at the parent's effort, so its title must not
+// claim one. Fork subagents are on here (`CLAUDE_CODE_FORK_SUBAGENT=1`).
+describe("toolInfoFromToolUse - fork subagent title", () => {
+  it("does not show an effort for a fork subagent", () => {
+    const info = toolInfoFromToolUse({
+      name: "Agent",
+      input: { description: "Explore", prompt: "Inspect", effort: "high", subagent_type: "fork" },
+    });
+    expect(info.title).toBe("Explore");
+  });
+
+  it("keeps the effort for a non-fork subagent", () => {
+    const info = toolInfoFromToolUse({
+      name: "Agent",
+      input: {
+        description: "Explore",
+        prompt: "Inspect",
+        effort: "high",
+        subagent_type: "general-purpose",
+      },
+    });
+    expect(info.title).toBe("Explore (high effort)");
+  });
+});

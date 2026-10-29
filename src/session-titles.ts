@@ -1,15 +1,20 @@
 /**
  * AI-generated session titles.
  *
- * Claude Code's own auto-title generation never runs under the Agent SDK — the
- * latch that arms it is pre-set in the headless path — so `SDKSessionInfo.summary`
- * degrades to the raw first prompt. This module asks the CLI for a real title
- * instead, via the `generate_session_title` control request, and publishes it
- * over ACP as a `session_info_update`.
+ * Claude Code titles a new SDK session itself: when it reads the first prompt,
+ * it asks a small model for a title and stores it in the transcript as an
+ * `ai-title` entry, a few seconds in, and sends no message when it does
+ * (upstream #1406 corrected the older claim that it never does). This module
+ * asks for the title with the `generate_session_title` control request, which
+ * returns the stored title or waits for the one being generated, and publishes
+ * it over ACP as a `session_info_update`. Where the CLI does not title the
+ * session itself (a resumed session, or nonessential traffic disabled), the
+ * same request generates it.
  *
  * {@link SessionTitles} holds the per-session state and is owned by `Session`.
- * `acp-agent.ts` drives it from four places: {@link SessionTitles.onPrompt} and
+ * `acp-agent.ts` drives it from five places: {@link SessionTitles.onPrompt} and
  * {@link SessionTitles.onAssistantText} to collect text,
+ * {@link SessionTitles.onPromptQueued} once a prompt is sent to the CLI,
  * {@link SessionTitles.onTurnEnd} at `session_state_changed: idle`, and
  * {@link SessionTitles.reset} on `conversation_reset`.
  */
@@ -61,6 +66,11 @@ export function appendTitleContext(previous: string | undefined, text: string): 
   return next.length > MAX_TITLE_CONTEXT_LENGTH ? next.slice(-MAX_TITLE_CONTEXT_LENGTH) : next;
 }
 
+/** The text chunks of a prompt, one per line. */
+function promptText(prompt: PromptRequest["prompt"]): string {
+  return prompt.flatMap((chunk) => (chunk.type === "text" ? [chunk.text] : [])).join("\n");
+}
+
 /** Whether this SDK still offers on-demand title generation. */
 function supportsTitleGeneration(query: Query): boolean {
   return typeof (query as TitleCapableQuery).generateSessionTitle === "function";
@@ -84,6 +94,17 @@ export class SessionTitles {
    *  one. Released by {@link reset}, and when generation yields nothing. */
   private settled = false;
 
+  /** Whether {@link onPromptQueued} asked for a title from the latest prompt
+   *  and did not fail. A turn end then does not ask again: like the CLI, a
+   *  prompt that yields no title gets one try, and the next prompt tries
+   *  again. A request that throws clears it, so the turn end asks as before
+   *  (story 062, R4.2). */
+  private askedAtPrompt = false;
+
+  /** Set once a real title — stored or generated — has been published, so a
+   *  generation still in flight never replaces it with a late result. */
+  private titled = false;
+
   constructor(
     private readonly agent: ClaudeAcpAgent,
     private readonly sessionId: string,
@@ -95,11 +116,28 @@ export class SessionTitles {
     if (this.settled) {
       return;
     }
-    const promptText = prompt
-      .flatMap((chunk) => (chunk.type === "text" ? [chunk.text] : []))
-      .join("\n");
+    this.context = appendTitleContext(this.context, `\n${promptText(prompt)}\n`);
+  }
 
-    this.context = appendTitleContext(this.context, `\n${promptText}\n`);
+  /** Ask for the title as soon as a prompt is sent to the CLI, instead of
+   *  waiting for `idle`, which comes only after the whole turn and its
+   *  background tasks. The CLI answers `generate_session_title` while the turn
+   *  runs, with the title it stored or is generating, so this makes no second
+   *  model call. The prompt alone is the description, because the CLI titles
+   *  from the prompt alone. */
+  onPromptQueued(session: Session, prompt: PromptRequest["prompt"]): void {
+    this.askedAtPrompt = false;
+    // `session.cancelled` is not checked: after a cancelled turn it stays set
+    // until the next turn starts, which is after this prompt is queued.
+    if (this.settled || session.queryClosed || !supportsTitleGeneration(session.query)) {
+      return;
+    }
+    const description = promptText(prompt).trim();
+    if (description.length < MIN_TITLE_CONTEXT_LENGTH) {
+      return;
+    }
+    this.askedAtPrompt = true;
+    this.startGeneration(() => this.titleFromPrompt(session, description));
   }
 
   /** Collect the assistant's own answer for the title. Chunks are appended
@@ -115,6 +153,8 @@ export class SessionTitles {
    *  `conversation_reset`, which mounts a fresh transcript. */
   reset(): void {
     this.settled = false;
+    this.askedAtPrompt = false;
+    this.titled = false;
     this.context = undefined;
     this.lastTitle = undefined;
   }
@@ -135,6 +175,7 @@ export class SessionTitles {
 
     if (info?.customTitle) {
       this.settled = true;
+      this.titled = true;
       this.context = undefined;
       await this.publish(info.customTitle, info.lastModified);
       return;
@@ -144,13 +185,9 @@ export class SessionTitles {
       ? { title: info.summary, lastModified: info.lastModified }
       : undefined;
 
-    if (this.canRequest(session)) {
-      this.settled = true;
-
-      void this.requestGenerateTitle(session, fallback).catch((error) => {
-        this.agent.logger.error(`Session ${this.sessionId}: session title update failed: ${error}`);
-      });
-
+    if (!this.askedAtPrompt && this.canRequest(session)) {
+      const description = this.context?.trim() ?? "";
+      this.startGeneration(() => this.requestGenerateTitle(session, description, fallback));
       return;
     }
     // Only while this session has no title of its own: `summary` degrades to the
@@ -201,17 +238,49 @@ export class SessionTitles {
     return (this.context?.trim().length ?? 0) >= MIN_TITLE_CONTEXT_LENGTH;
   }
 
-  /** Generate a title from the session's own text and publish it. `persist`
-   *  writes it to the session file, which is what carries it into
-   *  `session/list` and `session/load`. A null or failed generation releases the
-   *  latch so a later turn retries, and publishes `fallback` (the stored
-   *  summary) so a backend that can't generate titles is no worse off than
-   *  before. */
+  /** Latch the title and run `generation` in the background, so neither the
+   *  prompt nor turn-end waits on a model call. */
+  private startGeneration(generation: () => Promise<void>): void {
+    this.settled = true;
+    void generation().catch((error) => {
+      this.agent.logger.error(`Session ${this.sessionId}: session title update failed: ${error}`);
+    });
+  }
+
+  /** The prompt-time title: the one the session file already holds (a resumed
+   *  session's title, or a `/rename`), else one generated from `description`.
+   *  The file is read first because the CLI checks only the titles it holds in
+   *  memory before generating one. */
+  private async titleFromPrompt(session: Session, description: string): Promise<void> {
+    const info = await this.readSessionInfo(session);
+    if (this.agent.sessions[this.sessionId] !== session || this.titled) {
+      return;
+    }
+    if (info?.customTitle) {
+      this.titled = true;
+      this.context = undefined;
+      await this.publish(info.customTitle, info.lastModified);
+      return;
+    }
+    const fallback = info?.summary
+      ? { title: info.summary, lastModified: info.lastModified }
+      : undefined;
+    await this.requestGenerateTitle(session, description, fallback, true);
+  }
+
+  /** Generate a title from `description` and publish it. `persist` writes it
+   *  to the session file, which is what carries it into `session/list` and
+   *  `session/load`. A null or failed generation releases the latch so a later
+   *  prompt or turn end retries, and publishes `fallback` (the stored summary)
+   *  so a backend that can't generate titles is no worse off than before. A
+   *  prompt-time request that throws publishes nothing and lets the turn end
+   *  ask again. */
   private async requestGenerateTitle(
     session: Session,
+    description: string,
     fallback: TitleFallback | undefined,
+    atPrompt = false,
   ): Promise<void> {
-    const description = this.context?.trim() ?? "";
     let title: string | null = null;
 
     try {
@@ -223,11 +292,18 @@ export class SessionTitles {
       this.agent.logger.error(
         `Session ${this.sessionId}: failed to generate a session title: ${error}`,
       );
+      if (atPrompt) {
+        // The turn end titles it instead, from the prompt and the reply; the
+        // raw-prompt summary is not published in between.
+        this.askedAtPrompt = false;
+        this.settled = false;
+        return;
+      }
     }
 
     // A session torn down or replaced while the title was in flight must not
-    // adopt it.
-    if (this.agent.sessions[this.sessionId] !== session) {
+    // adopt it, and neither may one that got its title meanwhile.
+    if (this.agent.sessions[this.sessionId] !== session || this.titled) {
       return;
     }
 
@@ -240,6 +316,7 @@ export class SessionTitles {
       return;
     }
 
+    this.titled = true;
     this.context = undefined;
     await this.publish(title, Date.now());
   }
