@@ -150,6 +150,7 @@ import {
   ultracodeConfigOption,
   UltracodeOptionState,
 } from "./ultracode.js";
+import { deleteSessionIfStored } from "./session-delete.js";
 import {
   applyPlanUpdatesToOptions,
   createPlanUpdatesConfigOption,
@@ -7006,7 +7007,9 @@ export class ClaudeAcpAgent {
     if (this.sessions[params.sessionId]) {
       await this.teardownSession(params.sessionId);
     }
-    await deleteSession(params.sessionId);
+    // A never-prompted, unknown or non-UUID session has no transcript, and
+    // deleting it succeeds (upstream #1351); any other SDK failure still fails.
+    await deleteSessionIfStored(params.sessionId, deleteSession);
     return {};
   }
 
@@ -8622,17 +8625,35 @@ export class ClaudeAcpAgent {
       await this.teardownSession(params.sessionId);
     }
 
-    const response = await this.createSession(
-      {
-        cwd: params.cwd,
-        mcpServers: params.mcpServers ?? [],
-        additionalDirectories: params.additionalDirectories,
-        _meta: params._meta,
-      },
-      {
-        resume: params.sessionId,
-      },
-    );
+    const sessionParams = {
+      cwd: params.cwd,
+      mcpServers: params.mcpServers ?? [],
+      additionalDirectories: params.additionalDirectories,
+      _meta: params._meta,
+    };
+    let response: NewSessionResponse;
+    try {
+      response = await this.createSession(sessionParams, { resume: params.sessionId });
+    } catch (error) {
+      // Claude Code writes the conversation at the first prompt, so a live
+      // session never prompted has nothing to resume (upstream #1353). It had
+      // no history to lose: start a fresh query under the same public id, in
+      // the mode it had. A session not live here is really unknown, and any
+      // other failure is returned as before.
+      if (
+        !existingSession ||
+        !(error instanceof RequestError && error.code === RequestError.resourceNotFound().code)
+      ) {
+        throw error;
+      }
+      this.logger.log(
+        `[session/resume] session=${params.sessionId} was never persisted; starting a fresh query under the same id`,
+      );
+      response = await this.createSession(sessionParams, {
+        reuseSessionId: params.sessionId,
+        permissionMode: existingSession.modes.currentModeId as PermissionMode,
+      });
+    }
 
     return {
       sessionId: response.sessionId,
@@ -8676,6 +8697,8 @@ export class ClaudeAcpAgent {
       resume?: string;
       forkSession?: boolean;
       publicSessionId?: string;
+      /** Start a fresh query (no `resume`) under this existing session id. */
+      reuseSessionId?: string;
       permissionMode?: PermissionMode;
     } = {},
   ): Promise<NewSessionResponse> {
@@ -8695,6 +8718,8 @@ export class ClaudeAcpAgent {
       sessionId = randomUUID();
     } else if (creationOpts.resume) {
       sessionId = creationOpts.resume;
+    } else if (creationOpts.reuseSessionId) {
+      sessionId = creationOpts.reuseSessionId;
     } else {
       sessionId = randomUUID();
     }
