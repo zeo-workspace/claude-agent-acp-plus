@@ -2,3 +2,4 @@
 export const DEFAULT_MODEL_ID = "default";
 export const DEFAULT_AGENT_ID = "default";
 export const EFFORT_CONFIG_ID = "effort";
+export const PLAN_UPDATES_CONFIG_ID = "plan_updates";

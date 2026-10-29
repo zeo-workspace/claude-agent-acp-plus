@@ -150,6 +150,13 @@ import {
   ultracodeConfigOption,
   UltracodeOptionState,
 } from "./ultracode.js";
+import {
+  applyPlanUpdatesToOptions,
+  createPlanUpdatesConfigOption,
+  resolvePlanUpdatesAtSpawn,
+  resolvePlanUpdatesRequested,
+  TODO_TOOLS_ENV,
+} from "./plan-updates.js";
 import { handleRewindCommand, parseRewindInvocation, RewindDeps } from "./rewind-command.js";
 import { resolvePermissionMode, sessionAllowsBypass } from "./permissions/modes.js";
 import { normalizeDurablePermissionChangeSet } from "./permissions/normalization.js";
@@ -220,7 +227,11 @@ import {
   isExitPlanInterruptionResult,
   observeExitPlanToolResults,
 } from "./exit-plan.js";
-import { DEFAULT_AGENT_ID, EFFORT_CONFIG_ID } from "./session-config-ids.js";
+import {
+  DEFAULT_AGENT_ID,
+  EFFORT_CONFIG_ID,
+  PLAN_UPDATES_CONFIG_ID,
+} from "./session-config-ids.js";
 import { withPrecompactHistory } from "./compacted-history.js";
 import { findTranscript } from "./transcript-path.js";
 import { parseToolResultMeta } from "./tool-result-meta.js";
@@ -896,6 +907,15 @@ export type Session = {
   /** Whether the Ultracode option is shown — the CLI's
    *  `applied.ultracodeAvailable` once read back, the heuristic until then. */
   ultracodeAvailable: boolean;
+  /** The Plan updates intent (`plan-updates.ts`): whether the CLI runs with
+   *  its todo tools. Fixed at spawn, so a toggle recreates the query lazily
+   *  through `pendingQueryRecreate`. Optional only because tests hand-build
+   *  Session objects; absent reads as "never offered". */
+  planUpdatesEnabled?: boolean;
+  /** The settings tier's own value for `CLAUDE_CODE_ENABLE_TODO_TOOLS`, when
+   *  it defines one: that tier outranks the spawn env, so a recreate must
+   *  override it there too. */
+  planUpdatesSettingsValue?: boolean;
   /** Whether this session's resolved settings disable workflows — the half of
    *  the Ultracode gate that is not a model capability. Read once at
    *  initialize and held, rather than re-read per model switch: settings are
@@ -7050,6 +7070,20 @@ export class ClaudeAcpAgent {
       await applyUltracodeToggle(session, resolveUltracodeRequested(params), useBoolean);
       return { configOptions: session.configOptions };
     }
+    // Plan updates is fixed at CLI spawn: record the intent and recreate the
+    // query lazily at the next prompt, the path Thinking takes below. An
+    // invalid value throws before the session is touched.
+    if (params.configId === PLAN_UPDATES_CONFIG_ID) {
+      const enabled = resolvePlanUpdatesRequested(params);
+      if (enabled !== session.planUpdatesEnabled) {
+        session.planUpdatesEnabled = enabled;
+        session.pendingQueryRecreate = true;
+        session.configOptions = session.configOptions.map((o) =>
+          o.id === PLAN_UPDATES_CONFIG_ID ? createPlanUpdatesConfigOption(enabled, useBoolean) : o,
+        );
+      }
+      return { configOptions: session.configOptions };
+    }
     if (
       params.configId === EFFORT_CONFIG_ID &&
       isLegacyUltracodeEffort(params.value) &&
@@ -7956,6 +7990,13 @@ export class ClaudeAcpAgent {
           accounts: session.declaredAccounts,
           currentAccount: session.currentAccount,
         },
+        // Model-independent, threaded for the same reason as the account.
+        session.planUpdatesEnabled === undefined
+          ? undefined
+          : {
+              enabled: session.planUpdatesEnabled,
+              useBooleanOption: clientSupportsBooleanConfigOptions(this.clientCapabilities),
+            },
       );
 
       // Sync effort with the SDK if it changed after the model switch
@@ -8239,6 +8280,21 @@ export class ClaudeAcpAgent {
       if (thinking !== undefined) {
         options.thinking = thinking;
       }
+      // The Plan updates intent rides into the replacement's env (and the
+      // settings tier, when that tier pins the variable).
+      if (
+        session.planUpdatesEnabled !== undefined &&
+        !applyPlanUpdatesToOptions(
+          options,
+          session.planUpdatesEnabled,
+          session.planUpdatesSettingsValue,
+        )
+      ) {
+        this.logger.error(
+          `Session ${sessionId}: Plan updates set only in the spawn env: the settings ` +
+            `are a file path, and its env value for ${TODO_TOOLS_ENV} still applies.`,
+        );
+      }
       // A session that has not finished a turn yet has no transcript, and
       // resuming it fails ("No conversation found with session ID"): that is why
       // every fresh thread's first turn used to carry the "could not be applied"
@@ -8360,7 +8416,9 @@ export class ClaudeAcpAgent {
           this.sessions[sessionId] !== session
             ? "the session was evicted while the replacement query initialized"
             : "the session's query stream ended while the replacement query initialized";
-        this.logger.error(`Session ${sessionId}: abandoning Thinking query recreate: ${reason}.`);
+        this.logger.error(
+          `Session ${sessionId}: abandoning a config-change query recreate: ${reason}.`,
+        );
         newInput.end();
         try {
           newQuery.close();
@@ -8383,7 +8441,7 @@ export class ClaudeAcpAgent {
         session.modes.currentModeId !== appliedModeId
       ) {
         this.logger.error(
-          `Session ${sessionId}: abandoning Thinking query recreate: the session's model ` +
+          `Session ${sessionId}: abandoning a config-change query recreate: the session's model ` +
             `or permission mode changed while the replacement initialized; retrying on ` +
             `the next prompt.`,
         );
@@ -8428,7 +8486,7 @@ export class ClaudeAcpAgent {
       // prompt retries); the current turn proceeds with the previous thinking
       // config. Everything is contained here — never an unhandled rejection.
       this.logger.error(
-        `Session ${sessionId}: failed to recreate query for Thinking change:`,
+        `Session ${sessionId}: failed to recreate query for a config change (Thinking or Plan updates):`,
         error,
       );
       newInput.end();
@@ -8448,7 +8506,7 @@ export class ClaudeAcpAgent {
             content: {
               type: "text",
               text:
-                "Note: the updated Thinking setting could not be applied to this turn " +
+                "Note: the updated Thinking or Plan updates setting could not be applied to this turn " +
                 "(recreating the session's query failed), so it continues with the previous " +
                 "setting. The change will be retried on the next prompt.",
             },
@@ -8865,6 +8923,17 @@ export class ClaudeAcpAgent {
       // Opt-in to session state events like when the agent is idle
       CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
     };
+    // Plan updates (story 062): the todo tools are on unless an env the user
+    // wrote -- this spawn env or the settings tier the CLI applies after it --
+    // already decided; that value is kept and becomes the option's.
+    const planUpdatesSpawn = resolvePlanUpdatesAtSpawn(
+      env,
+      settingsManager.getSettings().env,
+      typeof settings === "object" ? settings.env : undefined,
+    );
+    if (planUpdatesSpawn.inject) {
+      (env as Record<string, string | undefined>)[TODO_TOOLS_ENV] = "1";
+    }
 
     // A resume or load continues in the mode of the transcript's last prompt
     // (upstream #1218), read from the configuration home this query runs with
@@ -9262,6 +9331,10 @@ export class ClaudeAcpAgent {
         accounts: declaredAccounts,
         currentAccount: accountEntry?.value,
       },
+      {
+        enabled: planUpdatesSpawn.enabled,
+        useBooleanOption: clientSupportsBooleanConfigOptions(this.clientCapabilities),
+      },
     );
 
     // Apply the initial effort level to the SDK so it matches the UI default.
@@ -9342,6 +9415,8 @@ export class ClaudeAcpAgent {
       currentAgent,
       ultracodeRequested,
       ultracodeAvailable: configOptions.some((o) => o.id === ULTRACODE_CONFIG_ID),
+      planUpdatesEnabled: planUpdatesSpawn.enabled,
+      planUpdatesSettingsValue: planUpdatesSpawn.settingsValue,
       workflowsDisabled,
       declaredAccounts,
       currentAccount: accountEntry?.value,
@@ -9804,6 +9879,9 @@ export function buildConfigOptions(
   /** The declared accounts plus the one in force, which decide whether an
    *  account selector is advertised at all (R6.1/R6.2). */
   settings?: AccountOptionState,
+  /** Display state for Plan updates; omitted by direct callers/tests, in
+   *  which case the option is not shown. */
+  planUpdates?: { enabled: boolean; useBooleanOption: boolean },
 ): SessionConfigOption[] {
   const options: SessionConfigOption[] = [
     SessionModeManager.configOption(modes),
@@ -9891,6 +9969,11 @@ export function buildConfigOptions(
   // and select-only ("on"/"off"), so every session shows it (R1.1).
   if (thinkingEnabled !== undefined) {
     options.push(createThinkingConfigOption(thinkingEnabled));
+  }
+
+  // Plan updates: model-independent, like Thinking (`plan-updates.ts`).
+  if (planUpdates) {
+    options.push(createPlanUpdatesConfigOption(planUpdates.enabled, planUpdates.useBooleanOption));
   }
 
   // Only surface the Agent picker when there's a real choice — i.e. the user
