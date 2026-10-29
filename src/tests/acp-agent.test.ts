@@ -12,6 +12,7 @@ import {
   PromptResponse,
   ReadTextFileRequest,
   ReadTextFileResponse,
+  RequestError,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
@@ -1879,6 +1880,15 @@ describe("synthetic login message (issue #863)", () => {
         content: [{ type: "text", text: "Session expired. Please run /login to sign in again." }],
       }),
     ).toBe(true);
+    // Newer CLI wording that drops "Please" (upstream #1481).
+    for (const text of [
+      "Not logged in · Run /login",
+      "Login expired · Run /login to sign in again, or re-authenticate your Anthropic profile",
+    ]) {
+      expect(
+        isSyntheticLoginMessage({ ...syntheticLoginApiMessage, content: [{ type: "text", text }] }),
+      ).toBe(true);
+    }
   });
 
   it("isSyntheticLoginMessage does not match real assistant messages", () => {
@@ -1894,6 +1904,19 @@ describe("synthetic login message (issue #863)", () => {
       isSyntheticLoginMessage({
         ...syntheticLoginApiMessage,
         content: [{ type: "text", text: "API Error: 500 Internal Server Error" }],
+      }),
+    ).toBe(false);
+    // Usage-limit banners can mention /login (to switch accounts) but are
+    // handled as usage limits, not as a sign-out.
+    expect(
+      isSyntheticLoginMessage({
+        ...syntheticLoginApiMessage,
+        content: [
+          {
+            type: "text",
+            text: "You've hit your limit · resets 5pm · run /login to switch to an API usage-billed account.",
+          },
+        ],
       }),
     ).toBe(false);
     expect(isSyntheticLoginMessage(undefined)).toBe(false);
@@ -4204,6 +4227,41 @@ describe("stop reason propagation", () => {
       input,
     });
   }
+
+  it("rejects an expired login the CLI reports as invalid_request with authRequired", async () => {
+    const updates: SessionNotification[] = [];
+    const agent = new ClaudeAcpAgent(
+      {
+        sessionUpdate: async (update: SessionNotification) => {
+          updates.push(update);
+        },
+      } as unknown as AcpClient,
+      { log: () => {}, error: () => {} },
+    );
+    await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+    // An expired token with no refresh token: the CLI tags this synthetic
+    // message `invalid_request`, not `authentication_failed` (upstream #1481).
+    const text =
+      "Login expired · Run /login to sign in again, or re-authenticate your Anthropic profile";
+    const loginExpired = createAssistantError("invalid_request");
+    loginExpired.message.model = "<synthetic>";
+    loginExpired.message.content = [{ type: "text", text, citations: null }] as any;
+    injectSession(agent, [
+      loginExpired,
+      createResultMessage({
+        subtype: "success",
+        stop_reason: "end_turn",
+        is_error: true,
+        result: text,
+      }),
+    ]);
+
+    await expect(
+      agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] }),
+    ).rejects.toMatchObject({ code: RequestError.authRequired().code });
+    await agent.sessions["test-session"]?.consumer;
+    expect(JSON.stringify(updates)).not.toContain("/login");
+  });
 
   it("should return max_tokens when success result has stop_reason max_tokens", async () => {
     const agent = createMockAgent();
