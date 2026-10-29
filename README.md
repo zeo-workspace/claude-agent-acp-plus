@@ -34,6 +34,7 @@ On top of upstream, aimed at parity with the Claude Code VS Code extension:
 - **Background tasks** — the live set of background tasks is published to the client
 - **Task feed** — every task the agent runs, with status, usage and timing, plus stop and send-to-background actions (see [Task feed](#task-feed))
 - **Session notices** — live advisories sent as ACP session notices, and context compaction reported rather than inferred
+- **Plan updates** — a session option, on by default, that fills the client's plan view with the agent's todo list on current models
 - **Ultracode** in the effort picker, and a model picker that offers only the newest model of each family
 - **Per-session account selection**, and an agent name taken from the installed package
 - Permission prompts that honour the CLI's `defaultToNo` and `suppressAlwaysAllowRule`
