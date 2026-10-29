@@ -336,3 +336,199 @@ describe("session titles at turn-end", () => {
     expect(titles()).toEqual(["Investigate Kafka lag alert on prod-3"]);
   });
 });
+
+// Story 062, R4.1/R4.2 (upstream 50cd76e, #1406): the title is asked for when
+// the prompt is queued, not at `idle`, which comes after the whole turn and
+// its background tasks -- 17.9 s against 0.8 s in upstream's live check.
+describe("session titles at prompt time", () => {
+  beforeEach(() => {
+    vi.mocked(getSessionInfo).mockReset();
+  });
+
+  const LONG_PROMPT = "Explain what the add function in hello.py does, in one sentence";
+
+  function titleRecorder() {
+    const updates: any[] = [];
+    const client = {
+      sessionUpdate: async (u: any) => {
+        if (u.update?.sessionUpdate === "session_info_update") updates.push(u.update);
+      },
+    } as unknown as AcpClient;
+    return { client, titles: () => updates.map((u) => u.title) };
+  }
+
+  function newAgent(client: AcpClient) {
+    return new ClaudeAcpAgent(client, { log: () => {}, error: () => {} });
+  }
+
+  /** One turn that holds its result until `release()`: the title has to land
+   *  while the turn is still running. */
+  function heldTurn(input: Pushable<any>) {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    async function* turn() {
+      const iter = input[Symbol.asyncIterator]();
+      const { value: userMessage } = await iter.next();
+      yield userEcho(userMessage);
+      await released;
+      yield successfulResultMessage();
+      yield { type: "system", subtype: "session_state_changed", state: "idle" };
+    }
+    return { generator: turn(), release };
+  }
+
+  function withTitles(generator: AsyncGenerator<any>, generate: (d: string) => Promise<any>) {
+    const generateSessionTitle = vi.fn(async (d: string, _o?: { persist?: boolean }) =>
+      generate(d),
+    );
+    return {
+      query: Object.assign(wrapQuery(generator), { generateSessionTitle }),
+      generateSessionTitle,
+    };
+  }
+
+  it("publishes the title while the first turn is still running, once", async () => {
+    const { client, titles } = titleRecorder();
+    const agent = newAgent(client);
+    vi.mocked(getSessionInfo).mockResolvedValue({
+      sessionId: "test-session",
+      summary: LONG_PROMPT,
+      lastModified: 1_700_000_000_000,
+    } as any);
+
+    const input = new Pushable<any>();
+    const { generator, release } = heldTurn(input);
+    const { query, generateSessionTitle } = withTitles(generator, async () => "Explain add()");
+    agent.sessions["test-session"] = mockSessionState({ query, input }, agent);
+
+    const done = agent.prompt({
+      sessionId: "test-session",
+      prompt: [{ type: "text", text: LONG_PROMPT }],
+    });
+    await vi.waitFor(() => {
+      expect(titles()).toEqual(["Explain add()"]);
+    });
+    expect(generateSessionTitle).toHaveBeenCalledWith(LONG_PROMPT, { persist: true });
+
+    release();
+    await done;
+    await agent.sessions["test-session"]?.consumer;
+    expect(generateSessionTitle).toHaveBeenCalledTimes(1);
+    expect(titles()).toEqual(["Explain add()"]);
+  });
+
+  // R4.2: a request that FAILS leaves the turn-end title in charge, as before.
+  it("falls back to the turn-end title when the prompt-time request fails", async () => {
+    const { client, titles } = titleRecorder();
+    const agent = newAgent(client);
+    vi.mocked(getSessionInfo).mockResolvedValue({
+      sessionId: "test-session",
+      summary: LONG_PROMPT,
+      lastModified: 1_700_000_000_000,
+    } as any);
+
+    const input = new Pushable<any>();
+    const { generator, release } = heldTurn(input);
+    let calls = 0;
+    const { query, generateSessionTitle } = withTitles(generator, async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("control request failed");
+      return "Explain add() at turn end";
+    });
+    agent.sessions["test-session"] = mockSessionState({ query, input }, agent);
+
+    const done = agent.prompt({
+      sessionId: "test-session",
+      prompt: [{ type: "text", text: LONG_PROMPT }],
+    });
+    await vi.waitFor(() => {
+      expect(generateSessionTitle).toHaveBeenCalledTimes(1);
+    });
+    release();
+    await done;
+    await agent.sessions["test-session"]?.consumer;
+    await vi.waitFor(() => {
+      expect(generateSessionTitle).toHaveBeenCalledTimes(2);
+    });
+    await vi.waitFor(() => {
+      expect(titles()).toEqual(["Explain add() at turn end"]);
+    });
+  });
+
+  it("ignores a late result for a session that got its title meanwhile", async () => {
+    const { client, titles } = titleRecorder();
+    const agent = newAgent(client);
+    // The turn end finds a `/rename` the user made while generation ran.
+    vi.mocked(getSessionInfo)
+      .mockResolvedValueOnce({
+        sessionId: "test-session",
+        summary: LONG_PROMPT,
+        lastModified: 1_700_000_000_000,
+      } as any)
+      .mockResolvedValue({
+        sessionId: "test-session",
+        summary: "Renamed by the user",
+        customTitle: "Renamed by the user",
+        lastModified: 1_700_000_000_001,
+      } as any);
+
+    const input = new Pushable<any>();
+    const { generator, release } = heldTurn(input);
+    let finish!: (title: string) => void;
+    const pending = new Promise<string>((resolve) => (finish = resolve));
+    const { query, generateSessionTitle } = withTitles(generator, () => pending);
+    agent.sessions["test-session"] = mockSessionState({ query, input }, agent);
+
+    const done = agent.prompt({
+      sessionId: "test-session",
+      prompt: [{ type: "text", text: LONG_PROMPT }],
+    });
+    await vi.waitFor(() => {
+      expect(generateSessionTitle).toHaveBeenCalledTimes(1);
+    });
+    release();
+    await done;
+    await agent.sessions["test-session"]?.consumer;
+    await vi.waitFor(() => {
+      expect(titles()).toEqual(["Renamed by the user"]);
+    });
+
+    finish("Generated too late");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(titles()).toEqual(["Renamed by the user"]);
+  });
+
+  it("publishes no title onto a session replaced while the title was generated", async () => {
+    const { client, titles } = titleRecorder();
+    const agent = newAgent(client);
+    vi.mocked(getSessionInfo).mockResolvedValue({
+      sessionId: "test-session",
+      summary: LONG_PROMPT,
+      lastModified: 1_700_000_000_000,
+    } as any);
+
+    const input = new Pushable<any>();
+    const { generator } = heldTurn(input);
+    let finish!: (title: string) => void;
+    const pending = new Promise<string>((resolve) => (finish = resolve));
+    const { query, generateSessionTitle } = withTitles(generator, () => pending);
+    const original = mockSessionState({ query, input }, agent);
+    agent.sessions["test-session"] = original;
+
+    void agent.prompt({
+      sessionId: "test-session",
+      prompt: [{ type: "text", text: LONG_PROMPT }],
+    });
+    await vi.waitFor(() => {
+      expect(generateSessionTitle).toHaveBeenCalledTimes(1);
+    });
+    agent.sessions["test-session"] = mockSessionState(
+      { query: wrapQuery(heldTurn(new Pushable<any>()).generator), input: new Pushable<any>() },
+      agent,
+    );
+
+    finish("Title for the old session");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(titles()).toEqual([]);
+  });
+});

@@ -2687,6 +2687,7 @@ export class ClaudeAcpAgent {
     session.turnQueue.push(turn);
     session.input.push(userMessage);
     this.ensureConsumer(session, params.sessionId);
+    session.titles.onPromptQueued(session, params.prompt);
     await this.publishGoalFromPrompt(params.sessionId, firstText, promptUuid);
     return response;
   }
