@@ -5045,8 +5045,20 @@ export class ClaudeAcpAgent {
                 }
                 break;
               }
-              case "plugin_install":
               case "notification":
+                // Fast-mode overage refused (PARITY-REPORT §23 item 114): every
+                // fast request is refused and resent at standard speed, and this
+                // is the CLI's only word on it. Exact key, this session only.
+                if (message.key === FAST_MODE_OVERAGE_REJECTED_KEY) {
+                  await this.onFastModeOverageRejected(
+                    params.sessionId,
+                    session,
+                    message.text,
+                    supportsNotices,
+                  );
+                }
+                break;
+              case "plugin_install":
               case "thinking_tokens":
                 // Todo: process via status api: https://docs.claude.com/en/docs/claude-code/hooks#hook-output
                 break;
@@ -8139,6 +8151,39 @@ export class ClaudeAcpAgent {
     this.refreshFastModeOption(session, enabled);
   }
 
+  /** Show the CLI's overage refusal and turn Fast mode off through the same
+   *  setter a user toggle uses, so the resend loop stops. A setter failure is
+   *  logged and the notice still goes out: the user must learn why fast
+   *  requests are slow either way. */
+  private async onFastModeOverageRejected(
+    sessionId: string,
+    session: Session,
+    text: string,
+    supportsNotices: boolean,
+  ): Promise<void> {
+    await this.client.sessionUpdate({
+      sessionId,
+      update: noticeOrTranscriptUpdate(
+        { severity: "warning", ...splitNoticeText(text, "Fast mode overage refused") },
+        supportsNotices,
+      ),
+    });
+    if (!session.fastModeEnabled) return;
+    try {
+      await this.applyFastMode(session, false);
+    } catch (error) {
+      this.logger.error(
+        `[fast-mode] session=${sessionId} could not turn fast mode off after an overage refusal:`,
+        error,
+      );
+      return;
+    }
+    await this.client.sessionUpdate({
+      sessionId,
+      update: { sessionUpdate: "config_option_update", configOptions: session.configOptions },
+    });
+  }
+
   /** The Ultracode display state for `buildConfigOptions`. */
   private ultracodeState(
     session: Pick<Session, "ultracodeRequested">,
@@ -9761,6 +9806,8 @@ export { MODE_CONFIG_ID };
 export const MODEL_CONFIG_ID = "model";
 export const AGENT_CONFIG_ID = "agent";
 export const FAST_MODE_CONFIG_ID = "fast";
+/** The CLI's `system/notification` key for a refused fast-mode overage. */
+export const FAST_MODE_OVERAGE_REJECTED_KEY = "fast-mode-overage-rejected";
 
 /** Select-fallback values used when the client has not opted into boolean
  *  config options (see {@link createFastModeConfigOption}). */

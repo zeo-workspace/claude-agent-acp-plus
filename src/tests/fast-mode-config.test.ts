@@ -486,3 +486,141 @@ describe("syncFastModeState (SDK-driven state changes)", () => {
     expect(disabledCase.sessionUpdates).toHaveLength(0);
   });
 });
+
+// Story 062, R5 (PARITY-REPORT §23 item 114): with fast-mode overage refused,
+// every fast request is refused and resent at standard speed, and the CLI says
+// so only through `system/notification` -- which the adapter dropped.
+describe("fast-mode overage refused", async () => {
+  const { Pushable } = await import("../utils.js");
+  const { mockSessionState, successfulResultMessage, userEcho, wrapQuery } =
+    await import("./session-doubles.js");
+  const OVERAGE_KEY = "fast-mode-overage-rejected";
+  const OVERAGE_TEXT = "Fast mode overage is off for your organization; using standard speed.";
+
+  function notification(key: string, sessionId: string) {
+    return {
+      type: "system",
+      subtype: "notification",
+      key,
+      text: OVERAGE_TEXT,
+      priority: "high",
+      uuid: crypto.randomUUID(),
+      session_id: sessionId,
+    };
+  }
+
+  /** A session whose one turn emits `messages` between the echo and the
+   *  result, with Fast mode on and its option shown as a native boolean. */
+  function fastSession(
+    agent: ClaudeAcpAgent,
+    sessionId: string,
+    messages: any[],
+    applyFlagSettings = vi.fn(async (_s: Record<string, unknown>) => {}),
+  ) {
+    const input = new Pushable<any>();
+    async function* turn() {
+      const iter = input[Symbol.asyncIterator]();
+      const { value } = await iter.next();
+      yield userEcho(value);
+      for (const m of messages) yield m;
+      yield successfulResultMessage();
+      yield { type: "system", subtype: "session_state_changed", state: "idle" };
+    }
+    const query = Object.assign(wrapQuery(turn()), { applyFlagSettings });
+    agent.sessions[sessionId] = mockSessionState(
+      {
+        query,
+        input,
+        fastModeEnabled: true,
+        configOptions: [createFastModeConfigOption(true, true)],
+      },
+      agent,
+      sessionId,
+    ) as any;
+    return { applyFlagSettings };
+  }
+
+  function recordingAgent() {
+    const updates: SessionNotification[] = [];
+    const agent = new ClaudeAcpAgent(
+      { sessionUpdate: async (n: SessionNotification) => void updates.push(n) } as AcpClient,
+      { log: () => {}, error: () => {} },
+    );
+    (agent as any).clientCapabilities = {
+      session: { configOptions: { boolean: {} }, notices: {} },
+    };
+    return { agent, updates };
+  }
+
+  const fastValue = (agent: ClaudeAcpAgent, id: string) =>
+    agent.sessions[id]!.configOptions.find((o) => o.id === FAST_MODE_CONFIG_ID)?.currentValue;
+
+  it("overage: shows the text as a notice, turns fast off and emits config_option_update", async () => {
+    const { agent, updates } = recordingAgent();
+    const { applyFlagSettings } = fastSession(agent, "s-a", [notification(OVERAGE_KEY, "s-a")]);
+
+    await agent.prompt({ sessionId: "s-a", prompt: [{ type: "text", text: "go" }] });
+    await agent.sessions["s-a"]?.consumer;
+
+    const mine = updates.filter((u) => u.sessionId === "s-a").map((u) => u.update as any);
+    expect(
+      mine.some((u) => u.sessionUpdate === "notice" && JSON.stringify(u).includes(OVERAGE_TEXT)),
+    ).toBe(true);
+    expect(applyFlagSettings).toHaveBeenCalledWith({ fastMode: false });
+    expect(agent.sessions["s-a"]!.fastModeEnabled).toBe(false);
+    expect(fastValue(agent, "s-a")).toBe(false);
+    const configUpdate = mine.find((u) => u.sessionUpdate === "config_option_update");
+    expect(
+      configUpdate?.configOptions.find((o: any) => o.id === FAST_MODE_CONFIG_ID)?.currentValue,
+    ).toBe(false);
+  });
+
+  // Hostile half of R5.2: scoped to the notification's own session.
+  it("overage: session A's notification leaves session B's fast mode on", async () => {
+    const { agent } = recordingAgent();
+    fastSession(agent, "s-a", [notification(OVERAGE_KEY, "s-a")]);
+    const b = fastSession(agent, "s-b", []);
+
+    await agent.prompt({ sessionId: "s-a", prompt: [{ type: "text", text: "go" }] });
+    await agent.sessions["s-a"]?.consumer;
+
+    expect(agent.sessions["s-b"]!.fastModeEnabled).toBe(true);
+    expect(fastValue(agent, "s-b")).toBe(true);
+    expect(b.applyFlagSettings).not.toHaveBeenCalled();
+  });
+
+  it("overage: a near-miss or another key keeps today's behaviour (R5.3)", async () => {
+    const { agent, updates } = recordingAgent();
+    const { applyFlagSettings } = fastSession(agent, "s-a", [
+      notification("fast-mode-overage-rejected-soon", "s-a"),
+      notification("FAST-MODE-OVERAGE-REJECTED", "s-a"),
+      notification("model-deprecated", "s-a"),
+    ]);
+
+    await agent.prompt({ sessionId: "s-a", prompt: [{ type: "text", text: "go" }] });
+    await agent.sessions["s-a"]?.consumer;
+
+    expect(applyFlagSettings).not.toHaveBeenCalled();
+    expect(agent.sessions["s-a"]!.fastModeEnabled).toBe(true);
+    expect(JSON.stringify(updates)).not.toContain(OVERAGE_TEXT);
+  });
+
+  it("overage: a setter failure still shows the notice", async () => {
+    const { agent, updates } = recordingAgent();
+    const failing = vi.fn(async () => {
+      throw new Error("control request rejected");
+    });
+    fastSession(agent, "s-a", [notification(OVERAGE_KEY, "s-a")], failing);
+
+    await agent.prompt({ sessionId: "s-a", prompt: [{ type: "text", text: "go" }] });
+    await agent.sessions["s-a"]?.consumer;
+
+    expect(failing).toHaveBeenCalledWith({ fastMode: false });
+    expect(
+      updates.some(
+        (u) =>
+          (u.update as any).sessionUpdate === "notice" && JSON.stringify(u).includes(OVERAGE_TEXT),
+      ),
+    ).toBe(true);
+  });
+});
