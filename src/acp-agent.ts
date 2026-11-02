@@ -261,6 +261,7 @@ import {
   structuredUsageMarkdown,
   syntheticLocalCommand,
 } from "./usage-markdown.js";
+import { STARTUP_FAILURE_RESULTS_ENV, startupFailureError } from "./startup-failure.js";
 
 export { DEFAULT_AGENT_ID, EFFORT_CONFIG_ID } from "./session-config-ids.js";
 import { MODE_CONFIG_ID, SessionModeManager } from "./session-mode.js";
@@ -9596,6 +9597,7 @@ export class ClaudeAcpAgent {
       ...providerEnv,
       // Opt-in to session state events like when the agent is idle
       CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
+      ...STARTUP_FAILURE_RESULTS_ENV,
     };
     // Plan updates (story 062): the todo tools are on unless an env the user
     // wrote -- this spawn env or the settings tier the CLI applies after it --
@@ -9805,6 +9807,13 @@ export class ClaudeAcpAgent {
     try {
       initializationResult = await q.initializationResult();
     } catch (error) {
+      // The CLI refused or exited: release the query so nothing of it is left behind (upstream
+      // closes it here too).
+      try {
+        q.close();
+      } catch (closeError) {
+        this.logger.error(`Failed to close a query that did not initialize: ${closeError}`);
+      }
       if (
         creationOpts.resume &&
         error instanceof Error &&
@@ -9813,7 +9822,9 @@ export class ClaudeAcpAgent {
       ) {
         throw RequestError.resourceNotFound(sessionId);
       }
-      throw error;
+      // Upstream #1508: the CLI's own reason (bad proxy URL, wrong org sign-in, …) as an ACP
+      // error, instead of "Claude Code process exited with code 1".
+      throw startupFailureError(error) ?? error;
     }
 
     if (

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { RequestError, SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import type { AcpClient, ClaudeAcpAgent as ClaudeAcpAgentType } from "../acp-agent.js";
+import { startupFailure } from "./helpers.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,6 +11,8 @@ let capturedOptions: Options | undefined;
 let contextUsageResult: (() => Promise<{ rawMaxTokens: number; model?: string }>) | undefined;
 let contextUsageCalls: Array<{ detail?: "summary" | "full" } | undefined> = [];
 let interruptImpl: (() => Promise<undefined>) | undefined;
+/** Upstream #1508: when set, `initializationResult()` rejects with it. */
+let initError: Error | undefined;
 let closeSpy: ReturnType<typeof vi.fn<() => void>>;
 vi.mock("@anthropic-ai/claude-agent-sdk", async () => {
   const actual = await vi.importActual<typeof import("@anthropic-ai/claude-agent-sdk")>(
@@ -23,16 +26,19 @@ vi.mock("@anthropic-ai/claude-agent-sdk", async () => {
       return makeMockQuery({
         interrupt: () => (interruptImpl ? interruptImpl() : Promise.resolve(undefined)),
         close: () => closeSpy(),
-        initializationResult: async () => ({
-          models: [
-            {
-              value: "claude-sonnet-4-6",
-              displayName: "Claude Sonnet",
-              description: "Fast",
-              supportsAutoMode: true,
-            },
-          ],
-        }),
+        initializationResult: async () => {
+          if (initError) throw initError;
+          return {
+            models: [
+              {
+                value: "claude-sonnet-4-6",
+                displayName: "Claude Sonnet",
+                description: "Fast",
+                supportsAutoMode: true,
+              },
+            ],
+          };
+        },
         getContextUsage: (opts?: { detail?: "summary" | "full" }) => {
           contextUsageCalls.push(opts);
           return contextUsageResult ? contextUsageResult() : Promise.resolve(DEFAULT_CONTEXT_USAGE);
@@ -68,6 +74,7 @@ describe("createSession options merging", () => {
     contextUsageResult = undefined;
     contextUsageCalls = [];
     interruptImpl = undefined;
+    initError = undefined;
     closeSpy = vi.fn<() => void>();
 
     vi.resetModules();
@@ -616,6 +623,36 @@ describe("createSession options merging", () => {
 
     it("accepts an existing absolute directory", async () => {
       await expect(agent.newSession({ cwd: process.cwd(), mcpServers: [] })).resolves.toBeDefined();
+    });
+  });
+
+  describe("startup failures", () => {
+    it("asks Claude Code to report why it could not start", async () => {
+      await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
+      expect(capturedOptions?.env?.CLAUDE_CODE_STARTUP_FAILURE_RESULTS).toBe("1");
+    });
+
+    it.each([
+      ["proxy_invalid", RequestError.internalError().code, "Internal error"],
+      ["gateway_signin_required", RequestError.authRequired().code, "Authentication required"],
+      ["org_pin_mismatch", RequestError.authRequired().code, "Authentication required"],
+      ["org_config_refused", RequestError.authRequired().code, "Authentication required"],
+      ["cwd_unavailable", RequestError.invalidParams().code, "Invalid params"],
+    ])("rejects with %s as code %i", async (reason, code, prefix) => {
+      initError = startupFailure(reason, "Fix the setting and restart Claude Code.");
+      await expect(agent.newSession({ cwd: process.cwd(), mcpServers: [] })).rejects.toMatchObject({
+        code,
+        message: `${prefix}: Fix the setting and restart Claude Code.`,
+        data: { startupFailureReason: reason },
+      });
+      expect(closeSpy).toHaveBeenCalled();
+    });
+
+    it("passes on an exit error that names no reason", async () => {
+      initError = new Error("Claude Code process exited with code 1. stderr: boom");
+      await expect(agent.newSession({ cwd: process.cwd(), mcpServers: [] })).rejects.toBe(
+        initError,
+      );
     });
   });
 

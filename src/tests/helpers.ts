@@ -58,3 +58,16 @@ export function makeMockQuery(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+/**
+ * The error `initializationResult()` rejects with when Claude Code refuses to
+ * start with `CLAUDE_CODE_STARTUP_FAILURE_RESULTS` set, as SDK 0.3.316 builds
+ * it from the CLI's error result (same message prefix and fields).
+ */
+export function startupFailure(reason: string, cliMessage: string): Error {
+  return Object.assign(new Error(`Claude Code returned an error result: ${cliMessage}`), {
+    telemetryMessage: "Claude Code returned an error result",
+    errorClass: "error_result",
+    startupFailureReason: reason,
+  });
+}
