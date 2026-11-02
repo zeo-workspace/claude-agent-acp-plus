@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.31.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.31.0...v0.31.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **deps:** override minimatch to 11.0.1 (GHSA-g3hv-75wg-m249) ([cb53897](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/cb53897e302b67d311bdc92c8f9183c51a2e89fe))
+
+
+### Miscellaneous Chores
+
+* **deps:** bump fast-uri from 3.1.8 to 3.1.9 ([49009e5](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/49009e57538b50fa4e481e56880dacd66c962290))
+* **deps:** bump the actions group with 2 updates ([687ca57](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/687ca5708a4fe4842b3f9c7d107aecb0d276cd38))
+* **deps:** bump the minor group across 1 directory with 41 updates ([32f07c7](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/32f07c7449d76c76271bc5a6d306e5d86bc534ef))
+
 ## [0.31.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.30.1...v0.31.0) (2026-10-29)
 
 
