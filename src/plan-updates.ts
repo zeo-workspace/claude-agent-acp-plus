@@ -1,6 +1,7 @@
 /**
  * Plan updates — a session-scoped boolean option that turns on the CLI's todo
- * tools, so Zed's plan view fills on current models.
+ * tools, so Zed's plan view fills on current models. Shown as "ToDo", after
+ * the list it fills; the id keeps the old name so saved defaults still match.
  *
  * **Why it exists.** The CLI enables `TodoWrite` only on legacy models unless
  * `CLAUDE_CODE_ENABLE_TODO_TOOLS` is set (upstream #1380); on Opus 5.x the
@@ -27,7 +28,7 @@ import type { SessionConfigOption, SetSessionConfigOptionRequest } from "@agentc
 import { PLAN_UPDATES_CONFIG_ID } from "./session-config-ids.js";
 
 export const TODO_TOOLS_ENV = "CLAUDE_CODE_ENABLE_TODO_TOOLS";
-export const PLAN_UPDATES_OPTION_NAME = "Plan updates";
+export const PLAN_UPDATES_OPTION_NAME = "ToDo";
 const PLAN_UPDATES_DESCRIPTION = "Show the agent's todo list in the plan view";
 /** The select-fallback spelling Fast mode and Ultracode use. */
 export const PLAN_UPDATES_ON = "on";
