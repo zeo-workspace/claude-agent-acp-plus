@@ -35,7 +35,10 @@
  * at each sync.
  */
 
-import type { SessionConfigOption, SetSessionConfigOptionRequest } from "@agentclientprotocol/sdk";
+import type {
+  SessionConfigOption,
+  SetSessionConfigOptionRequest,
+} from "@agentclientprotocol/sdk/unstable";
 import type { EffortLevel, Settings } from "@anthropic-ai/claude-agent-sdk";
 
 /** Config option id. */

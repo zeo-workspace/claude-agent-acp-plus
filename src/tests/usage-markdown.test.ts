@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { SessionNotification } from "@agentclientprotocol/sdk";
+import { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import { randomUUID } from "crypto";
 import type { SDKControlGetUsageResponse } from "@anthropic-ai/claude-agent-sdk";
 import { AcpClient, ClaudeAcpAgent } from "../acp-agent.js";
@@ -195,6 +195,159 @@ describe("usage Markdown - parsing and rendering", () => {
 
     it("renders no pattern table when the period has none", () => {
       expect(formatUsageResponse(usageResponse)).not.toContain("Usage pattern");
+    });
+  });
+
+  // Story 071 (R3.1-R3.4): `behaviors.{day,week}.recommendations` (agent SDK 0.3.305+) render under
+  // the usage patterns. A fix is for the session that answered, and Zeo's Run button (patch 0054)
+  // opens a NEW thread, so no fix may ever be a code block: a slash-command fix is inline code on a
+  // `Fix:` line, copyable into the current thread; any other fix is escaped text on one.
+  describe("recommendations (story 071)", () => {
+    const withWeek = (extra: Record<string, unknown>) =>
+      formatUsageResponse({
+        ...usageResponse,
+        behaviors: {
+          ...(usageResponse as any).behaviors,
+          week: {
+            ...(usageResponse as any).behaviors.week,
+            behaviors: [{ key: "cache_miss", pct: 41, count: 12 }],
+            ...extra,
+          },
+        },
+      } as unknown as SDKControlGetUsageResponse);
+    const fence = "```";
+    /**
+     * Every code block CommonMark would see, as its trimmed text: backtick and tilde fences at
+     * any indentation up to three spaces, and indented code (a line led by four spaces or a tab
+     * that is not inside a fence) — the shapes Zeo's 0054 asks about.
+     */
+    const codeBlocks = (text: string) => {
+      const blocks: string[] = [];
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const open = /^ {0,3}(`{3,}|~{3,})/.exec(lines[i]);
+        if (open) {
+          const body: string[] = [];
+          for (i++; i < lines.length && !lines[i].trimStart().startsWith(open[1]); i++) {
+            body.push(lines[i]);
+          }
+          blocks.push(body.join("\n").trim());
+        } else if (/^( {4}|\t)/.test(lines[i]) && lines[i].trim() !== "") {
+          blocks.push(lines[i].trim());
+        }
+      }
+      return blocks;
+    };
+    const fixOf = (...messages: string[]) =>
+      withWeek({
+        recommendations: [{ key: "max_effort", pct: 30, title: "Lower effort" }],
+        fix: { keys: ["max_effort"], messages },
+      });
+
+    it("multi-line, prefixed, spaced and doubled-slash fixes render as text, never as a block", () => {
+      for (const message of ["/effort medium\n/clear", "run /effort medium", "/ x", "//x"]) {
+        const formatted = fixOf(message);
+        expect(codeBlocks(formatted)).toEqual([]);
+      }
+    });
+
+    it("a slash-command fix is inline code on a Fix line, never a code block", () => {
+      const formatted = fixOf("/model sonnet", "/compact");
+      expect(formatted).toContain("Fix: `/model sonnet`");
+      expect(formatted).toContain("Fix: `/compact`");
+      expect(codeBlocks(formatted)).toEqual([]);
+    });
+
+    it("a fix shared by day and week is shown once", () => {
+      const fix = { keys: ["max_effort"], messages: ["/effort medium"] };
+      const recommendations = [{ key: "max_effort", pct: 30, title: "Lower effort" }];
+      const formatted = formatUsageResponse({
+        ...usageResponse,
+        behaviors: {
+          day: { ...(usageResponse as any).behaviors.day, recommendations, fix },
+          week: { ...(usageResponse as any).behaviors.week, recommendations, fix },
+        },
+      } as unknown as SDKControlGetUsageResponse);
+      expect(formatted.split("Fix: `/effort medium`").length - 1).toBe(1);
+    });
+
+    it("a fix that is not a slash command renders as escaped text", () => {
+      const formatted = fixOf("Split the *big* task into subagents");
+      expect(codeBlocks(formatted)).toEqual([]);
+      expect(formatted).toContain("Fix: Split the \\*big\\* task into subagents");
+    });
+
+    it("whitespace-led or tilde-fenced fix text never becomes a block", () => {
+      const cases = [
+        ["~~~", " /clear", "~~~"],
+        ["Do this first", "    /clear"],
+        ["      /clear"],
+        ["\t\t/clear"],
+      ];
+      for (const messages of cases) {
+        expect(codeBlocks(fixOf(...messages))).toEqual([]);
+      }
+    });
+
+    it("a slash command carrying a backtick is text, so it cannot break out of its block", () => {
+      const formatted = fixOf("/model `x`");
+      expect(codeBlocks(formatted)).toEqual([]);
+    });
+
+    it("a title or detail holding a fence or a lone /clear never becomes runnable", () => {
+      const formatted = withWeek({
+        recommendations: [
+          { key: "a", pct: 20, title: `${fence}\n/clear\n${fence}`, detail: "/clear" },
+          { key: "b", pct: 10, title: "/clear", detail: `${fence}\n/compact\n${fence}` },
+        ],
+      });
+      expect(codeBlocks(formatted)).toEqual([]);
+      expect(formatted).not.toMatch(/^\/clear$/m);
+    });
+
+    it("renders title, percentage and detail per recommendation, largest share first", () => {
+      const formatted = withWeek({
+        recommendations: [
+          { key: "long_context", pct: 12, title: "Start a new session", detail: "at >150k" },
+          { key: "max_effort", pct: 30, title: "Lower effort", detail: "/effort medium" },
+        ],
+      });
+      expect(formatted).toContain("**Recommendations**");
+      expect(formatted).toContain("- **30%** Lower effort \u00b7 /effort medium");
+      expect(formatted).toContain("- **12%** Start a new session \u00b7 at \\>150k");
+      expect(formatted.indexOf("Lower effort")).toBeLessThan(formatted.indexOf("Start a new"));
+      expect(formatted.indexOf("Usage pattern")).toBeLessThan(formatted.indexOf("Recommendations"));
+    });
+
+    it("a recommendation with no detail and no fix renders its title and share alone", () => {
+      const formatted = withWeek({
+        recommendations: [{ key: "cron", pct: 5, title: "Stop idle sessions" }],
+      });
+      expect(formatted).toContain("- **5%** Stop idle sessions\n");
+      expect(codeBlocks(formatted)).toEqual([]);
+    });
+
+    it("skips malformed recommendations and keeps the rest of the report", () => {
+      const formatted = withWeek({
+        recommendations: [
+          { key: "a", pct: "lots", title: "Bad share" },
+          { key: "b", pct: 20 },
+          null,
+          { key: "c", pct: 15, title: "Good one" },
+        ],
+        fix: { keys: ["c"], messages: "not-an-array" },
+      });
+      expect(formatted).toContain("- **15%** Good one");
+      expect(formatted).not.toContain("Bad share");
+      expect(formatted).toContain("Usage pattern");
+    });
+
+    it("no recommendations: the report is exactly what it was before (golden)", () => {
+      const golden =
+        "## Usage\n\n> Claude max subscription usage\n\n### Limits\n\n**5-hour limit** — **3%** · Resets <t>\n\n`█░░░░░░░░░░░░░░░░░░░`\n\n**Weekly · all models** — **0%** · Resets <t>\n\n`░░░░░░░░░░░░░░░░░░░░`\n\n**Weekly · Fable** — **0%**\n\n`░░░░░░░░░░░░░░░░░░░░`\n\n---\n\n### This session\n\n| Cost | API time | Active |\n|:--|:--|:--|\n| $0.33 | 20s | 1m 9s |\n\n| Breakdown | Tokens |\n|:--|--:|\n| Input | 4 |\n| Output | 872 |\n| Cache read | 98.7K |\n| Cache write | 25.3K |\n\n---\n\n### What’s using your limits?\n\n> Approximate, overlapping measures · this machine only · excludes claude.ai\n\n**Last 24h** · 34 requests · 3 sessions\n\n| MCP server | Usage |\n|:--|--:|\n| ccd\\_session\\_mgmt | `███░░░░░░░░░░░░░░░░░` 13% |\n\n**Last 7d** · 43 requests · 5 sessions\n\n| Usage pattern | Usage | Requests |\n|:--|--:|--:|\n| Hit a >100k-token cache miss | `████████░░░░░░░░░░░░` 41% | 12 |\n\n| MCP server | Usage |\n|:--|--:|\n| claude\\_agent\\_acp | `█░░░░░░░░░░░░░░░░░░░` 3% |";
+      const normalized = (text: string) => text.replace(/Resets [^\n]*/g, "Resets <t>");
+      expect(normalized(withWeek({}))).toBe(golden);
+      expect(normalized(withWeek({ recommendations: [] }))).toBe(golden);
     });
   });
 

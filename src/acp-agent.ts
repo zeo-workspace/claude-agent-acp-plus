@@ -53,7 +53,7 @@ import {
   WriteTextFileRequest,
   WriteTextFileResponse,
   StopReason,
-} from "@agentclientprotocol/sdk";
+} from "@agentclientprotocol/sdk/unstable";
 import {
   AgentInfo,
   CanUseTool,
@@ -134,6 +134,7 @@ import {
 import {
   createThinkingConfigOption,
   effectiveThinkingConfig,
+  modelCanDisableThinking,
   resolveThinkingSelection,
   THINKING_CONFIG_ID,
 } from "./thinking-option.js";
@@ -4766,6 +4767,19 @@ export class ClaudeAcpAgent {
                 );
                 break;
               }
+              case "session_writes_lost": {
+                // SDK 0.3.317+: the CLI could not write its transcript or
+                // ~/.claude.json because the disk (or quota) was full. Same
+                // class as mirror_error — lost session data a human must act
+                // on — so it is logged the same way; the wire is unchanged.
+                this.logger.error(
+                  `Session ${message.session_id}: session writes lost (${message.error_code}): ${(message.lost ?? []).join(", ")}` +
+                    (message.transcript_session_ids?.length
+                      ? `; transcripts: ${message.transcript_session_ids.join(", ")}`
+                      : ""),
+                );
+                break;
+              }
               case "permission_denied": {
                 // A tool call was auto-denied (by a rule, the classifier,
                 // dontAsk mode, etc.) before running. The tool_use block was
@@ -7114,13 +7128,21 @@ export class ClaudeAcpAgent {
     // refreshed and acked immediately, mirroring Fast mode. An unrecognized
     // value deliberately falls through to the shared invalid-option-value
     // validation below rather than growing a bespoke error shape.
+    //
+    // An "off" on a model that cannot turn thinking off is still kept as the
+    // intent rather than refused (story 071, R2.2): a client holding the option
+    // list from before a model switch gets no error, the option reads "on"
+    // there and the query runs adaptive (`effectiveThinkingConfig`), and the
+    // retained Off holds again on a model that can honour it. (Zed itself
+    // drops a saved default the option does not list, so it never sends one.)
     if (params.configId === THINKING_CONFIG_ID) {
       const enabled = resolveThinkingSelection(params.value);
+      const canDisable = modelCanDisableThinking(session.modelInfos, session.models.currentModelId);
       if (enabled !== null) {
         session.thinkingEnabled = enabled;
         session.pendingQueryRecreate = true;
         session.configOptions = session.configOptions.map((o) =>
-          o.id === THINKING_CONFIG_ID ? createThinkingConfigOption(enabled) : o,
+          o.id === THINKING_CONFIG_ID ? createThinkingConfigOption(enabled, canDisable) : o,
         );
         return { configOptions: session.configOptions };
       }
@@ -7938,6 +7960,16 @@ export class ClaudeAcpAgent {
       // carries no "1m" token.
       const newModelInfo = session.modelInfos.find((m) => m.value === value);
       const modelChanged = session.models.currentModelId !== value;
+      // A retained Off is sent as `disabled` or as `adaptive` depending on the
+      // model (story 071): when the switch changes which, the query must be
+      // rebuilt at the next prompt, as a Thinking change itself would.
+      if (
+        session.thinkingEnabled === false &&
+        modelCanDisableThinking(session.modelInfos, session.models.currentModelId) !==
+          modelCanDisableThinking(session.modelInfos, value)
+      ) {
+        session.pendingQueryRecreate = true;
+      }
       if (modelChanged) {
         // Seed the new model's context window WITHOUT awaited IPC on the
         // switch path: cached authoritative value if we've already learned it
@@ -8293,6 +8325,7 @@ export class ClaudeAcpAgent {
         session.thinkingEnabled,
         process.env.MAX_THINKING_TOKENS,
         this.logger,
+        modelCanDisableThinking(session.modelInfos, session.models.currentModelId),
       );
 
       // Snapshot of the live-tracked model/mode the replacement is built
@@ -10038,10 +10071,16 @@ export function buildConfigOptions(
   }
 
   // Surface the Thinking toggle whenever the caller supplies its display
-  // state. Unlike Fast mode it is model-independent — no `supported` gate —
-  // and select-only ("on"/"off"), so every session shows it (R1.1).
+  // state. Unlike Fast mode there is no `supported` gate — every session shows
+  // it (R1.1) — but on a model that always thinks it offers "on" alone
+  // (story 071, R2.2).
   if (thinkingEnabled !== undefined) {
-    options.push(createThinkingConfigOption(thinkingEnabled));
+    options.push(
+      createThinkingConfigOption(
+        thinkingEnabled,
+        modelCanDisableThinking(modelInfos, models.currentModelId),
+      ),
+    );
   }
 
   // Plan updates: model-independent, like Thinking (`plan-updates.ts`).

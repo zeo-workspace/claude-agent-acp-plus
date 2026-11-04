@@ -4,7 +4,7 @@ import { promises as fsp } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { quotaCachePath, writeLimits } from "../quota-cache.js";
-import type { SessionNotification } from "@agentclientprotocol/sdk";
+import type { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import { ClaudeAcpAgent, quotaPollIntervalMs, type AcpClient } from "../acp-agent.js";
 import { Pushable } from "../utils.js";
 import { NO_PLAN_RATE_LIMITS } from "./helpers.js";

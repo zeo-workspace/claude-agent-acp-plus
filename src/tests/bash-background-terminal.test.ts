@@ -12,7 +12,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { randomUUID } from "crypto";
-import type { SessionNotification } from "@agentclientprotocol/sdk";
+import type { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import { AcpClient, ClaudeAcpAgent } from "../acp-agent.js";
 import {
   idle,

@@ -24,7 +24,10 @@
  */
 
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
-import type { SessionConfigOption, SetSessionConfigOptionRequest } from "@agentclientprotocol/sdk";
+import type {
+  SessionConfigOption,
+  SetSessionConfigOptionRequest,
+} from "@agentclientprotocol/sdk/unstable";
 import { PLAN_UPDATES_CONFIG_ID } from "./session-config-ids.js";
 
 export const TODO_TOOLS_ENV = "CLAUDE_CODE_ENABLE_TODO_TOOLS";

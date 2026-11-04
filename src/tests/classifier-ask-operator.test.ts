@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { RequestPermissionRequest } from "@agentclientprotocol/sdk";
+import type { RequestPermissionRequest } from "@agentclientprotocol/sdk/unstable";
 import { createAskOperator } from "../classifier-escalation.js";
 
 /**

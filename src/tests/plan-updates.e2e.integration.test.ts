@@ -9,7 +9,7 @@ import {
   ndJsonStream,
   type SessionConfigOption,
   type SessionNotification,
-} from "@agentclientprotocol/sdk";
+} from "@agentclientprotocol/sdk/unstable";
 import { nodeToWebReadable, nodeToWebWritable } from "../utils.js";
 
 /**

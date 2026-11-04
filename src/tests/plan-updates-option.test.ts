@@ -3,7 +3,7 @@ import type {
   ClientCapabilities,
   SessionConfigOption,
   SessionNotification,
-} from "@agentclientprotocol/sdk";
+} from "@agentclientprotocol/sdk/unstable";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import * as fs from "node:fs";
 import * as os from "node:os";

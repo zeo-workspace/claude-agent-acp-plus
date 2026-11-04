@@ -10,7 +10,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionNotification,
-} from "@agentclientprotocol/sdk";
+} from "@agentclientprotocol/sdk/unstable";
 import { nodeToWebReadable, nodeToWebWritable } from "../utils.js";
 
 /**

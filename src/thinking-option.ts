@@ -16,8 +16,8 @@
  * creation.
  */
 
-import type { SessionConfigOption } from "@agentclientprotocol/sdk";
-import type { ThinkingConfig } from "@anthropic-ai/claude-agent-sdk";
+import type { SessionConfigOption } from "@agentclientprotocol/sdk/unstable";
+import type { ModelInfo, ThinkingConfig } from "@anthropic-ai/claude-agent-sdk";
 
 /** Stable id for the Thinking session config option. */
 export const THINKING_CONFIG_ID = "thinking";
@@ -26,6 +26,8 @@ export const THINKING_ON = "on";
 /** Select value that turns extended thinking off. */
 export const THINKING_OFF = "off";
 const THINKING_DESCRIPTION = "Extended thinking before responding";
+const ALWAYS_THINKS_DESCRIPTION =
+  "Extended thinking before responding. This model always thinks: it cannot turn thinking off";
 
 /**
  * Minimal logging surface this module needs — structurally compatible with
@@ -42,22 +44,61 @@ export interface ThinkingLogger {
  * exact shape of the Fast mode select fallback (R1.1). Unlike Fast mode there
  * is no boolean variant — the option is select-only from day one.
  *
+ * On a model that cannot turn thinking off (story 071, R2.2) the row stays —
+ * an option missing from one rebuild drops from the picker — but offers "on"
+ * alone, reads "on" whatever the retained intent, and says why: since agent
+ * SDK 0.3.300 a `disabled` there runs adaptive thinking, so an "Off" shown on
+ * that model would be a promise the SDK does not keep.
+ *
  * @param enabled Whether extended thinking is currently on for the session;
  *   reflected in `currentValue`.
+ * @param canDisable `modelCanDisableThinking` for the selected model.
  */
-export function createThinkingConfigOption(enabled: boolean): SessionConfigOption {
+export function createThinkingConfigOption(
+  enabled: boolean,
+  canDisable: boolean = true,
+): SessionConfigOption {
   return {
     id: THINKING_CONFIG_ID,
     name: "Thinking",
-    description: THINKING_DESCRIPTION,
+    description: canDisable ? THINKING_DESCRIPTION : ALWAYS_THINKS_DESCRIPTION,
     category: "model_config",
     type: "select",
-    currentValue: enabled ? THINKING_ON : THINKING_OFF,
-    options: [
-      { value: THINKING_ON, name: "On" },
-      { value: THINKING_OFF, name: "Off" },
-    ],
+    currentValue: enabled || !canDisable ? THINKING_ON : THINKING_OFF,
+    options: canDisable
+      ? [
+          { value: THINKING_ON, name: "On" },
+          { value: THINKING_OFF, name: "Off" },
+        ]
+      : [{ value: THINKING_ON, name: "On" }],
   };
+}
+
+/**
+ * Whether the model can run with thinking off (story 071, R2.2). The CLI
+ * states it per model as `ModelInfo.supportsThinkingOff`, a runtime field the
+ * SDK's `sdk.d.ts` does not declare, so it is narrowed from `unknown` here.
+ * Only an explicit `false` means "always thinks": a CLI that predates the field
+ * (absent), an unknown model, or a malformed value keep today's behaviour —
+ * the SDK, not a list of model names, is the one source. The CLI marks the
+ * field internal, so a CLI that stops sending it puts every model back on
+ * `disabled`, which the CLI itself turns into adaptive where it must.
+ *
+ * The row is matched by its picker `value`, else by `resolvedModel` — both by
+ * exact equality, so `claude-haiku-5-5` and `claude-haiku-5-5[1m]` stay apart.
+ *
+ * @param infos The session's `ModelInfo` rows (`supportedModels()`).
+ * @param modelId The selected model's id.
+ */
+export function modelCanDisableThinking(
+  infos: readonly ModelInfo[],
+  modelId: string | undefined,
+): boolean {
+  if (modelId === undefined) return true;
+  const row =
+    infos.find((info) => info.value === modelId) ??
+    infos.find((info) => info.resolvedModel === modelId);
+  return (row as { supportsThinkingOff?: unknown } | undefined)?.supportsThinkingOff !== false;
 }
 
 /**
@@ -107,7 +148,10 @@ export function resolveThinkingConfig(
  * legacy `MAX_THINKING_TOKENS` env resolution:
  *
  * - `intent === false` → `{ type: "disabled" }`, the SDK's documented
- *   no-extended-thinking value — the option beats the env var (R1.5).
+ *   no-extended-thinking value — except on a model that cannot turn thinking
+ *   off (story 071), where the SDK would run `disabled` as adaptive anyway:
+ *   there it sends `{ type: "adaptive" }`, what the model will really do.
+ *   Either way the option beats the env var (R1.5).
  * - `intent === true` → the env resolution when the env var is set (R1.4);
  *   with the env var unset — or invalid, which is logged and treated as unset
  *   — the SDK's documented enabled default `{ type: "adaptive" }` ("Claude
@@ -120,13 +164,15 @@ export function resolveThinkingConfig(
  * @param env The raw `MAX_THINKING_TOKENS` value (pass
  *   `process.env.MAX_THINKING_TOKENS`).
  * @param logger Sink for the invalid-env error.
+ * @param canDisable `modelCanDisableThinking` for the model the query runs.
  */
 export function effectiveThinkingConfig(
   intent: boolean | undefined,
   env: string | undefined,
   logger: ThinkingLogger,
+  canDisable: boolean = true,
 ): ThinkingConfig | undefined {
-  if (intent === false) return { type: "disabled" };
+  if (intent === false) return canDisable ? { type: "disabled" } : { type: "adaptive" };
   if (intent === true) return resolveThinkingConfig(env, logger) ?? { type: "adaptive" };
   return resolveThinkingConfig(env, logger);
 }

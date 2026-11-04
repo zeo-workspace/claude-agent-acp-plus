@@ -49,7 +49,7 @@
  * every coupling to it is paid again at each sync.
  */
 
-import { SessionNotification } from "@agentclientprotocol/sdk";
+import { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import {
   ContextCompactionMetadata,
   createContextCompactionMeta,

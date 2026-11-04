@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { SessionNotification } from "@agentclientprotocol/sdk";
+import { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import { AcpClient, ClaudeAcpAgent } from "../acp-agent.js";
 import { Pushable } from "../utils.js";
 import {

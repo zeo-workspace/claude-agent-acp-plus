@@ -45,6 +45,11 @@ import { fileURLToPath } from "node:url";
  *     re-run for it (the bump's live check stopped at session/new, no model
  *     turn).
  *
+ *   - **0.3.296 -> 0.3.318, 2026-11-03, by hand (story 071).** With ACP SDK
+ *     2.4.0 and @anthropic-ai/sdk 1.4.0, past upstream's 0.3.316 pin, inside the
+ *     cooldown by operator decision. 0.3.317 adds the `session_writes_lost`
+ *     system message. The background-subagent probe was NOT re-run for it.
+ *
  * Neither measurement is a regression test, and that is the point of the
  * paragraph below: re-measure on the next crossing rather than trusting green.
  *
@@ -79,7 +84,7 @@ const MIRROR_ROOT = join(HERE, "..", "..");
 const FORK_ROOT = join(MIRROR_ROOT, "..", "fork");
 
 const SDK = "@anthropic-ai/claude-agent-sdk";
-const PINNED = "0.3.296";
+const PINNED = "0.3.318";
 
 function readJson(path: string): Record<string, any> {
   return JSON.parse(readFileSync(path, "utf8"));

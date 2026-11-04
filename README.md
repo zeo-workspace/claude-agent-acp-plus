@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/%40lucascouts%2Fclaude-agent-acp-plus)](https://www.npmjs.com/package/@lucascouts/claude-agent-acp-plus)
 
-> A **fork** of [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp) that ports features from the Claude Code VS Code extension to ACP clients (like Zed), for a friendlier experience. Tracks upstream through v0.70.0. Requires Node.js >= 24.
+> A **fork** of [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp) that ports features from the Claude Code VS Code extension to ACP clients (like Zed), for a friendlier experience. Tracks upstream through v0.70.0. Requires Node.js >= 24. Built on the ACP TypeScript SDK 2.x (`@agentclientprotocol/sdk` 2.4.0, its `/unstable` entry; ACP protocol v1 on the wire) and the Claude Agent SDK 0.3.318, which bundles Claude Code 2.1.318.
 
 Use [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview#branding-guidelines) from [ACP-compatible](https://agentclientprotocol.com) clients!
 

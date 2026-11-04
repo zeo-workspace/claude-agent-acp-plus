@@ -11,7 +11,7 @@ import {
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
-} from "@agentclientprotocol/sdk";
+} from "@agentclientprotocol/sdk/unstable";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "crypto";
 import * as fs from "node:fs";

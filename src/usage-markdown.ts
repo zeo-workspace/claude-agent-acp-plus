@@ -176,7 +176,7 @@ function usageBar(fraction: number): string {
 
 /** Server-supplied text is DATA, not Markdown: neutralise it before inlining. */
 function escapeMarkdown(value: string): string {
-  return value.replace(/([\\`*_[\]<>|])/g, "\\$1").replace(/[\r\n]+/g, " ");
+  return value.replace(/([\\`*_~[\]<>|])/g, "\\$1").replace(/[\r\n]+/g, " ");
 }
 
 /** Milliseconds per second — {@link toEpochSeconds} answers in the latter. */
@@ -313,8 +313,75 @@ function readBehaviors(period: unknown): { key: string; pct: number; count: numb
   return rows.sort((a, b) => b.pct - a.pct);
 }
 
+/**
+ * A fix message that is ONE slash command, in the shape Claude Code's own
+ * commands take (story 071, R3.2): `/name` with an optional argument line, on a
+ * single line, with no backtick that could close the inline code span it goes
+ * in. Never a code block: a fix is for the session that answered, and the Run
+ * button Zeo's patch 0054 puts on a slash-command block opens a NEW thread.
+ */
+const SLASH_COMMAND_FIX = /^\/[a-z][a-z0-9-]*( .*)?$/;
+
+function isSlashCommandFix(message: string): boolean {
+  return SLASH_COMMAND_FIX.test(message) && !message.includes("`");
+}
+
+/**
+ * A period's recommendations (agent SDK 0.3.305+), read defensively like
+ * `readBehaviors`: the schema does not validate them, so one malformed entry
+ * is skipped and the rest of the report still renders. Largest share first.
+ */
+function readRecommendations(period: unknown): { pct: number; title: string; detail?: string }[] {
+  const raw = (period as { recommendations?: unknown } | null)?.recommendations;
+  if (!Array.isArray(raw)) return [];
+  const rows: { pct: number; title: string; detail?: string }[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { pct, title, detail } = entry as { pct?: unknown; title?: unknown; detail?: unknown };
+    if (typeof pct !== "number" || !Number.isFinite(pct) || pct < 0) continue;
+    if (typeof title !== "string" || title.trim() === "") continue;
+    rows.push({ pct, title, ...(typeof detail === "string" && detail.trim() ? { detail } : {}) });
+  }
+  return rows.sort((a, b) => b.pct - a.pct);
+}
+
+/** The period's one-step fix messages, in the CLI's order; non-strings are dropped. */
+function readFixMessages(period: unknown): string[] {
+  const messages = (period as { fix?: { messages?: unknown } } | null)?.fix?.messages;
+  if (!Array.isArray(messages)) return [];
+  return messages.filter((m): m is string => typeof m === "string" && m.trim() !== "");
+}
+
+/**
+ * @param shownFixes Fixes already rendered for another period: the CLI repeats
+ *   the session's one fix under day and week, and it is shown once.
+ */
+function appendRecommendations(lines: string[], period: unknown, shownFixes: Set<string>): void {
+  const recommendations = readRecommendations(period);
+  if (recommendations.length === 0) return;
+  lines.push("", "**Recommendations**", "");
+  for (const { pct, title, detail } of recommendations) {
+    const tail = detail === undefined ? "" : ` \u00b7 ${escapeMarkdown(detail)}`;
+    lines.push(`- **${pct}%** ${escapeMarkdown(title)}${tail}`);
+  }
+  const messages = readFixMessages(period);
+  const fixKey = messages.join("\n");
+  if (messages.length === 0 || shownFixes.has(fixKey)) return;
+  shownFixes.add(fixKey);
+  for (const message of messages) {
+    // Every fix sits after a "Fix:" label on its own line: a line led by a word
+    // opens no code block — not a fence, not indented code — so 0054 never puts
+    // Run on it, whatever whitespace or `~~~` the message carries.
+    const shown = isSlashCommandFix(message)
+      ? `\`${message}\``
+      : escapeMarkdown(message.trim().replace(/\s+/g, " "));
+    lines.push("", `Fix: ${shown}`);
+  }
+}
+
 function appendContributions(
   lines: string[],
+  shownFixes: Set<string>,
   label: string,
   period: {
     request_count: number;
@@ -336,6 +403,7 @@ function appendContributions(
       );
     }
   }
+  appendRecommendations(lines, period, shownFixes);
   if (period.mcp_servers.length === 0) {
     return;
   }
@@ -443,8 +511,9 @@ function appendBehaviors(lines: string[], usage: SDKControlGetUsageResponse): vo
     "",
     "> Approximate, overlapping measures \u00b7 this machine only \u00b7 excludes claude.ai",
   );
-  appendContributions(lines, "Last 24h", usage.behaviors.day);
-  appendContributions(lines, "Last 7d", usage.behaviors.week);
+  const shownFixes = new Set<string>();
+  appendContributions(lines, shownFixes, "Last 24h", usage.behaviors.day);
+  appendContributions(lines, shownFixes, "Last 7d", usage.behaviors.week);
 }
 
 /** Render the SDK's structured `/usage` response as Markdown (R2.3). */
