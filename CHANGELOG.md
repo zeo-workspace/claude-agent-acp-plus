@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.32.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.31.1...v0.32.0) (2026-11-04)
+
+
+### Features
+
+* **plan-updates:** name the option "ToDo" ([#193](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/193)) ([5be3137](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/5be31376e050e18cc18c7d2925d9a4059af922e4))
+
+
+### Miscellaneous Chores
+
+* **deps:** bump the actions group with 2 updates ([#189](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/189)) ([c6c3c76](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/c6c3c76df57c32f1187ed2bdd88ac636938db4c1))
+* **deps:** bump the minor group with 13 updates ([#190](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/190)) ([624170c](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/624170ce6ecd214b2790106f078798d9b1f33b42))
+
 ## [0.31.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.31.0...v0.31.1) (2026-11-02)
 
 
