@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.33.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.32.0...v0.33.0) (2026-11-04)
+
+
+### Features
+
+* **071:** /usage recommendations with their fixes ([2c62b06](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/2c62b0695aac6bcd85e0e00d889835aa863d9bdd))
+
+
+### Bug Fixes
+
+* **071:** Thinking Off keeps its meaning on the new SDK ([2c62b06](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/2c62b0695aac6bcd85e0e00d889835aa863d9bdd))
+
+
+### Miscellaneous Chores
+
+* **071:** release as 0.33.0 ([#197](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/197)) ([f3b1221](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/f3b1221888b15f88a50fe55d6a71296a5d1875a3))
+
+
+### Build System
+
+* **071:** ACP SDK 2.4.0, agent SDK 0.3.318, @anthropic-ai/sdk 1.4.0 ([2c62b06](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/2c62b0695aac6bcd85e0e00d889835aa863d9bdd))
+
 ## [0.32.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.31.1...v0.32.0) (2026-11-04)
 
 
