@@ -8555,7 +8555,7 @@ export class ClaudeAcpAgent {
             content: {
               type: "text",
               text:
-                "Note: the updated Thinking or Plan updates setting could not be applied to this turn " +
+                "Note: the updated Thinking or ToDo setting could not be applied to this turn " +
                 "(recreating the session's query failed), so it continues with the previous " +
                 "setting. The change will be retried on the next prompt.",
             },

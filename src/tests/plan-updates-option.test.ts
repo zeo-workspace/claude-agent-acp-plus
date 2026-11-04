@@ -198,13 +198,13 @@ async function writeTranscript(sessionId: string) {
 }
 
 describe("Plan updates option offer and env (1.1)", () => {
-  it("is offered as a boolean named Plan updates, on by default (R1.1)", async () => {
+  it("is offered as a boolean named ToDo, on by default (R1.1)", async () => {
     const { agent } = await startAgent(BOOLEAN_CLIENT);
     const response = await newSession(agent);
 
     const option = planOption(response.configOptions);
     expect(option, "plan_updates offered on a new session").toBeDefined();
-    expect(option).toMatchObject({ id: OPTION_ID, name: "Plan updates", type: "boolean" });
+    expect(option).toMatchObject({ id: OPTION_ID, name: "ToDo", type: "boolean" });
     expect(option?.currentValue).toBe(true);
   });
 
@@ -217,7 +217,7 @@ describe("Plan updates option offer and env (1.1)", () => {
     // The same spelling the existing boolean options use for their fallback.
     expect(option).toMatchObject({
       id: OPTION_ID,
-      name: "Plan updates",
+      name: "ToDo",
       type: "select",
       currentValue: "on",
       options: [
