@@ -4,7 +4,7 @@
  * session — that the next matching call consumes to skip the classifier.
  */
 
-import type { SessionNotification } from "@agentclientprotocol/sdk";
+import type { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import type { HookCallback, HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 // Type-only: acp-agent.ts imports this module at runtime, so the agent is
 // passed in as a parameter rather than imported.

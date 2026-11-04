@@ -21,7 +21,7 @@ import { appendFile, mkdir, mkdtemp, rm, truncate, unlink, writeFile } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "crypto";
-import type { SessionNotification } from "@agentclientprotocol/sdk";
+import type { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import { TailPoller, TaskFeed, TaskFeedPublisher } from "../task-feed.js";
 import { readTail } from "../task-output.js";
 import { AcpClient, ClaudeAcpAgent, TASKS_META_KEY } from "../acp-agent.js";

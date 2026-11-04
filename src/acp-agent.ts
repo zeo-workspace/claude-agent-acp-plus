@@ -53,7 +53,7 @@ import {
   WriteTextFileRequest,
   WriteTextFileResponse,
   StopReason,
-} from "@agentclientprotocol/sdk";
+} from "@agentclientprotocol/sdk/unstable";
 import {
   AgentInfo,
   CanUseTool,
@@ -4763,6 +4763,19 @@ export class ClaudeAcpAgent {
                 // resume. Log it and surface a warning in the conversation.
                 this.logger.error(
                   `Session ${message.session_id}: failed to persist history: ${message.error}`,
+                );
+                break;
+              }
+              case "session_writes_lost": {
+                // SDK 0.3.317+: the CLI could not write its transcript or
+                // ~/.claude.json because the disk (or quota) was full. Same
+                // class as mirror_error — lost session data a human must act
+                // on — so it is logged the same way; the wire is unchanged.
+                this.logger.error(
+                  `Session ${message.session_id}: session writes lost (${message.error_code}): ${(message.lost ?? []).join(", ")}` +
+                    (message.transcript_session_ids?.length
+                      ? `; transcripts: ${message.transcript_session_ids.join(", ")}`
+                      : ""),
                 );
                 break;
               }

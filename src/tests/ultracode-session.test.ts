@@ -15,7 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SessionConfigOption, SessionNotification } from "@agentclientprotocol/sdk";
+import type { SessionConfigOption, SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import type { Settings } from "@anthropic-ai/claude-agent-sdk";
 import { AcpClient, ClaudeAcpAgent } from "../acp-agent.js";
 import { SettingsManager } from "../settings.js";

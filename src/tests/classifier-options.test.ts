@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { RequestPermissionResponse } from "@agentclientprotocol/sdk";
+import type { RequestPermissionResponse } from "@agentclientprotocol/sdk/unstable";
 import {
   PERMISSION_OPTION_ID,
   buildClassifierEscalationOptions,

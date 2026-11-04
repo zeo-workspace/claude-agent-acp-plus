@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { SessionConfigOption } from "@agentclientprotocol/sdk";
+import type { SessionConfigOption } from "@agentclientprotocol/sdk/unstable";
 import type { EffortLevel, ModelInfo } from "@anthropic-ai/claude-agent-sdk";
 import {
   createUltracodeConfigOption,

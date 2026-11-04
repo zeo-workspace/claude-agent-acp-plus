@@ -1,0 +1,542 @@
+{
+  "recordedOn": "ACP SDK 1.x, before story 071's dependency move",
+  "variants": {
+    "bare": {
+      "protocolVersion": 1,
+      "agentCapabilities": {
+        "_meta": {
+          "claudeCode": {
+            "promptQueueing": true
+          },
+          "_claude/tasks": {
+            "version": 2
+          },
+          "_claude/usage": {
+            "version": 1
+          }
+        },
+        "promptCapabilities": {
+          "image": true,
+          "embeddedContext": true
+        },
+        "mcpCapabilities": {
+          "http": true,
+          "sse": true
+        },
+        "auth": {
+          "logout": {}
+        },
+        "providers": {},
+        "loadSession": true,
+        "sessionCapabilities": {
+          "additionalDirectories": {},
+          "close": {},
+          "delete": {},
+          "fork": {},
+          "list": {},
+          "resume": {}
+        }
+      },
+      "agentInfo": {
+        "name": "<package.name>",
+        "title": "Claude Agent",
+        "version": "<package.version>"
+      },
+      "authMethods": [],
+      "_meta": {
+        "jetbrains": {
+          "air": {
+            "version": 1,
+            "capabilities": ["sessionFailure", "agentFileChangeReport"]
+          }
+        },
+        "steering": {
+          "supported": true
+        },
+        "goal": {
+          "version": 1,
+          "controlMethod": "_session/goal",
+          "actions": ["set", "clear"]
+        }
+      }
+    },
+    "terminal-auth": {
+      "protocolVersion": 1,
+      "agentCapabilities": {
+        "_meta": {
+          "claudeCode": {
+            "promptQueueing": true
+          },
+          "_claude/tasks": {
+            "version": 2
+          },
+          "_claude/usage": {
+            "version": 1
+          }
+        },
+        "promptCapabilities": {
+          "image": true,
+          "embeddedContext": true
+        },
+        "mcpCapabilities": {
+          "http": true,
+          "sse": true
+        },
+        "auth": {
+          "logout": {}
+        },
+        "providers": {},
+        "loadSession": true,
+        "sessionCapabilities": {
+          "additionalDirectories": {},
+          "close": {},
+          "delete": {},
+          "fork": {},
+          "list": {},
+          "resume": {}
+        }
+      },
+      "agentInfo": {
+        "name": "<package.name>",
+        "title": "Claude Agent",
+        "version": "<package.version>"
+      },
+      "authMethods": [
+        {
+          "description": "Use Claude subscription ",
+          "name": "Claude Subscription",
+          "id": "claude-ai-login",
+          "type": "terminal",
+          "args": ["--cli", "auth", "login", "--claudeai"]
+        },
+        {
+          "description": "Use Anthropic Console (API usage billing)",
+          "name": "Anthropic Console",
+          "id": "console-login",
+          "type": "terminal",
+          "args": ["--cli", "auth", "login", "--console"]
+        }
+      ],
+      "_meta": {
+        "jetbrains": {
+          "air": {
+            "version": 1,
+            "capabilities": ["sessionFailure", "agentFileChangeReport"]
+          }
+        },
+        "steering": {
+          "supported": true
+        },
+        "goal": {
+          "version": 1,
+          "controlMethod": "_session/goal",
+          "actions": ["set", "clear"]
+        }
+      }
+    },
+    "meta-terminal-auth": {
+      "protocolVersion": 1,
+      "agentCapabilities": {
+        "_meta": {
+          "claudeCode": {
+            "promptQueueing": true
+          },
+          "_claude/tasks": {
+            "version": 2
+          },
+          "_claude/usage": {
+            "version": 1
+          }
+        },
+        "promptCapabilities": {
+          "image": true,
+          "embeddedContext": true
+        },
+        "mcpCapabilities": {
+          "http": true,
+          "sse": true
+        },
+        "auth": {
+          "logout": {}
+        },
+        "providers": {},
+        "loadSession": true,
+        "sessionCapabilities": {
+          "additionalDirectories": {},
+          "close": {},
+          "delete": {},
+          "fork": {},
+          "list": {},
+          "resume": {}
+        }
+      },
+      "agentInfo": {
+        "name": "<package.name>",
+        "title": "Claude Agent",
+        "version": "<package.version>"
+      },
+      "authMethods": [
+        {
+          "description": "Use Claude subscription ",
+          "name": "Claude Subscription",
+          "id": "claude-ai-login",
+          "type": "terminal",
+          "args": ["--cli", "auth", "login", "--claudeai"],
+          "_meta": {
+            "terminal-auth": {
+              "command": "<node>",
+              "args": ["<adapter-argv>", "--cli", "auth", "login", "--claudeai"],
+              "label": "Claude Login"
+            }
+          }
+        },
+        {
+          "description": "Use Anthropic Console (API usage billing)",
+          "name": "Anthropic Console",
+          "id": "console-login",
+          "type": "terminal",
+          "args": ["--cli", "auth", "login", "--console"],
+          "_meta": {
+            "terminal-auth": {
+              "command": "<node>",
+              "args": ["<adapter-argv>", "--cli", "auth", "login", "--console"],
+              "label": "Anthropic Console Login"
+            }
+          }
+        }
+      ],
+      "_meta": {
+        "jetbrains": {
+          "air": {
+            "version": 1,
+            "capabilities": ["sessionFailure", "agentFileChangeReport"]
+          }
+        },
+        "steering": {
+          "supported": true
+        },
+        "goal": {
+          "version": 1,
+          "controlMethod": "_session/goal",
+          "actions": ["set", "clear"]
+        }
+      }
+    },
+    "gateway": {
+      "protocolVersion": 1,
+      "agentCapabilities": {
+        "_meta": {
+          "claudeCode": {
+            "promptQueueing": true
+          },
+          "_claude/tasks": {
+            "version": 2
+          },
+          "_claude/usage": {
+            "version": 1
+          }
+        },
+        "promptCapabilities": {
+          "image": true,
+          "embeddedContext": true
+        },
+        "mcpCapabilities": {
+          "http": true,
+          "sse": true
+        },
+        "auth": {
+          "logout": {}
+        },
+        "providers": {},
+        "loadSession": true,
+        "sessionCapabilities": {
+          "additionalDirectories": {},
+          "close": {},
+          "delete": {},
+          "fork": {},
+          "list": {},
+          "resume": {}
+        }
+      },
+      "agentInfo": {
+        "name": "<package.name>",
+        "title": "Claude Agent",
+        "version": "<package.version>"
+      },
+      "authMethods": [
+        {
+          "id": "gateway",
+          "name": "Custom model gateway",
+          "description": "Use a custom gateway to authenticate and access models",
+          "_meta": {
+            "gateway": {
+              "protocol": "anthropic"
+            }
+          }
+        },
+        {
+          "id": "gateway-bedrock",
+          "name": "Custom model gateway",
+          "description": "Use a custom gateway to authenticate and access models",
+          "_meta": {
+            "gateway": {
+              "protocol": "bedrock"
+            }
+          }
+        }
+      ],
+      "_meta": {
+        "jetbrains": {
+          "air": {
+            "version": 1,
+            "capabilities": ["sessionFailure", "agentFileChangeReport"]
+          }
+        },
+        "steering": {
+          "supported": true
+        },
+        "goal": {
+          "version": 1,
+          "controlMethod": "_session/goal",
+          "actions": ["set", "clear"]
+        }
+      }
+    },
+    "acp-probe": {
+      "protocolVersion": 1,
+      "agentCapabilities": {
+        "_meta": {
+          "claudeCode": {
+            "promptQueueing": true
+          },
+          "_claude/tasks": {
+            "version": 2
+          },
+          "_claude/usage": {
+            "version": 1
+          }
+        },
+        "promptCapabilities": {
+          "image": true,
+          "embeddedContext": true
+        },
+        "mcpCapabilities": {
+          "http": true,
+          "sse": true
+        },
+        "auth": {
+          "logout": {}
+        },
+        "providers": {},
+        "loadSession": true,
+        "sessionCapabilities": {
+          "additionalDirectories": {},
+          "close": {},
+          "delete": {},
+          "fork": {},
+          "list": {},
+          "resume": {}
+        }
+      },
+      "agentInfo": {
+        "name": "<package.name>",
+        "title": "Claude Agent",
+        "version": "<package.version>"
+      },
+      "authMethods": [
+        {
+          "description": "Use Claude subscription ",
+          "name": "Claude Subscription",
+          "id": "claude-ai-login",
+          "type": "terminal",
+          "args": ["--cli", "auth", "login", "--claudeai"],
+          "_meta": {
+            "terminal-auth": {
+              "command": "<node>",
+              "args": ["<adapter-argv>", "--cli", "auth", "login", "--claudeai"],
+              "label": "Claude Login"
+            }
+          }
+        },
+        {
+          "description": "Use Anthropic Console (API usage billing)",
+          "name": "Anthropic Console",
+          "id": "console-login",
+          "type": "terminal",
+          "args": ["--cli", "auth", "login", "--console"],
+          "_meta": {
+            "terminal-auth": {
+              "command": "<node>",
+              "args": ["<adapter-argv>", "--cli", "auth", "login", "--console"],
+              "label": "Anthropic Console Login"
+            }
+          }
+        }
+      ],
+      "_meta": {
+        "jetbrains": {
+          "air": {
+            "version": 1,
+            "capabilities": ["sessionFailure", "agentFileChangeReport"]
+          }
+        },
+        "steering": {
+          "supported": true
+        },
+        "goal": {
+          "version": 1,
+          "controlMethod": "_session/goal",
+          "actions": ["set", "clear"]
+        }
+      }
+    },
+    "remote": {
+      "protocolVersion": 1,
+      "agentCapabilities": {
+        "_meta": {
+          "claudeCode": {
+            "promptQueueing": true
+          },
+          "_claude/tasks": {
+            "version": 2
+          },
+          "_claude/usage": {
+            "version": 1
+          }
+        },
+        "promptCapabilities": {
+          "image": true,
+          "embeddedContext": true
+        },
+        "mcpCapabilities": {
+          "http": true,
+          "sse": true
+        },
+        "auth": {
+          "logout": {}
+        },
+        "providers": {},
+        "loadSession": true,
+        "sessionCapabilities": {
+          "additionalDirectories": {},
+          "close": {},
+          "delete": {},
+          "fork": {},
+          "list": {},
+          "resume": {}
+        }
+      },
+      "agentInfo": {
+        "name": "<package.name>",
+        "title": "Claude Agent",
+        "version": "<package.version>"
+      },
+      "authMethods": [
+        {
+          "description": "Run `claude /login` in the terminal",
+          "name": "Log in with Claude",
+          "id": "claude-login",
+          "type": "terminal",
+          "args": ["--cli"],
+          "_meta": {
+            "terminal-auth": {
+              "command": "<node>",
+              "args": ["<adapter-argv>", "--cli"],
+              "label": "Claude Login"
+            }
+          }
+        }
+      ],
+      "_meta": {
+        "jetbrains": {
+          "air": {
+            "version": 1,
+            "capabilities": ["sessionFailure", "agentFileChangeReport"]
+          }
+        },
+        "steering": {
+          "supported": true
+        },
+        "goal": {
+          "version": 1,
+          "controlMethod": "_session/goal",
+          "actions": ["set", "clear"]
+        }
+      }
+    },
+    "hide-claude-auth": {
+      "protocolVersion": 1,
+      "agentCapabilities": {
+        "_meta": {
+          "claudeCode": {
+            "promptQueueing": true
+          },
+          "_claude/tasks": {
+            "version": 2
+          },
+          "_claude/usage": {
+            "version": 1
+          }
+        },
+        "promptCapabilities": {
+          "image": true,
+          "embeddedContext": true
+        },
+        "mcpCapabilities": {
+          "http": true,
+          "sse": true
+        },
+        "auth": {
+          "logout": {}
+        },
+        "providers": {},
+        "loadSession": true,
+        "sessionCapabilities": {
+          "additionalDirectories": {},
+          "close": {},
+          "delete": {},
+          "fork": {},
+          "list": {},
+          "resume": {}
+        }
+      },
+      "agentInfo": {
+        "name": "<package.name>",
+        "title": "Claude Agent",
+        "version": "<package.version>"
+      },
+      "authMethods": [
+        {
+          "description": "Use Anthropic Console (API usage billing)",
+          "name": "Anthropic Console",
+          "id": "console-login",
+          "type": "terminal",
+          "args": ["--cli", "auth", "login", "--console"],
+          "_meta": {
+            "terminal-auth": {
+              "command": "<node>",
+              "args": ["<adapter-argv>", "--cli", "auth", "login", "--console"],
+              "label": "Anthropic Console Login"
+            }
+          }
+        }
+      ],
+      "_meta": {
+        "jetbrains": {
+          "air": {
+            "version": 1,
+            "capabilities": ["sessionFailure", "agentFileChangeReport"]
+          }
+        },
+        "steering": {
+          "supported": true
+        },
+        "goal": {
+          "version": 1,
+          "controlMethod": "_session/goal",
+          "actions": ["set", "clear"]
+        }
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { randomUUID } from "crypto";
-import type { SessionNotification } from "@agentclientprotocol/sdk";
+import type { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import { ClaudeAcpAgent, type AcpClient } from "../acp-agent.js";
 import { Pushable } from "../utils.js";
 import {

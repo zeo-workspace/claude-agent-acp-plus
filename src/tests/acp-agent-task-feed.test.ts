@@ -6,7 +6,7 @@
 // `session_info_update`. Assertions read the wire payload only.
 
 import { describe, expect, it, vi } from "vitest";
-import type { SessionNotification } from "@agentclientprotocol/sdk";
+import type { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import {
   AcpClient,
   BACKGROUND_TASKS_META_KEY,

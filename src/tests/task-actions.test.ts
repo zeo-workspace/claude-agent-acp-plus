@@ -8,7 +8,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { PassThrough } from "node:stream";
-import { client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
+import { client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk/unstable";
 import { AcpClient, ClaudeAcpAgent, runAcp } from "../acp-agent.js";
 import { nodeToWebReadable, nodeToWebWritable } from "../utils.js";
 import {
@@ -290,8 +290,20 @@ function wire(): Wire {
   const connection = acpClient({ name: "task-actions-test" })
     .onNotification(methods.client.session.update, () => {})
     .connect(ndJsonStream(nodeToWebWritable(toAgent), nodeToWebReadable(fromAgent)));
+  let initialized: Promise<unknown> | undefined;
   return {
-    request: (method, params) => connection.agent.request(method, params as any),
+    request: (method, params) => {
+      // ACP SDK 2.x refuses every request before `initialize` ("ACP connection must be
+      // initialized before …"), as a real client always sends it first; the wire does too.
+      if (method === methods.agent.initialize) {
+        return (initialized = connection.agent.request(method, params as any));
+      }
+      initialized ??= connection.agent.request(methods.agent.initialize, {
+        protocolVersion: 1,
+        clientCapabilities: {},
+      });
+      return initialized.then(() => connection.agent.request(method, params as any));
+    },
     agent: started.agent,
   };
 }

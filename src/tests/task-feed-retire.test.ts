@@ -4,7 +4,7 @@
 // session, and client-supplied ids cannot forge a log field.
 
 import { describe, expect, it, vi } from "vitest";
-import type { SessionNotification } from "@agentclientprotocol/sdk";
+import type { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import { AcpClient, ClaudeAcpAgent, TASKS_META_KEY } from "../acp-agent.js";
 import {
   idle,

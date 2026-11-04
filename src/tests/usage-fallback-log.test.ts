@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { SessionNotification } from "@agentclientprotocol/sdk";
+import { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import { randomUUID } from "crypto";
 import type { SDKControlGetUsageResponse } from "@anthropic-ai/claude-agent-sdk";
 import { AcpClient, ClaudeAcpAgent } from "../acp-agent.js";

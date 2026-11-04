@@ -22,7 +22,7 @@ import {
   methods,
   ndJsonStream,
   type SessionNotification,
-} from "@agentclientprotocol/sdk";
+} from "@agentclientprotocol/sdk/unstable";
 import {
   ClaudeAcpAgent,
   runAcp,
@@ -303,8 +303,20 @@ function wire() {
       notifications.push(ctx.params);
     })
     .connect(ndJsonStream(nodeToWebWritable(toAgent), nodeToWebReadable(fromAgent)));
+  let initialized: Promise<unknown> | undefined;
   return {
-    request: (method: string, params: unknown) => connection.agent.request(method, params as any),
+    request: (method: string, params: unknown) => {
+      // ACP SDK 2.x refuses every request before `initialize` ("ACP connection must be
+      // initialized before …"), as a real client always sends it first; the wire does too.
+      if (method === methods.agent.initialize) {
+        return (initialized = connection.agent.request(method, params as any));
+      }
+      initialized ??= connection.agent.request(methods.agent.initialize, {
+        protocolVersion: 1,
+        clientCapabilities: {},
+      });
+      return initialized.then(() => connection.agent.request(method, params as any));
+    },
     agent: started.agent,
     notifications,
   };

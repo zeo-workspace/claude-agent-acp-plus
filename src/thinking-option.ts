@@ -16,7 +16,7 @@
  * creation.
  */
 
-import type { SessionConfigOption } from "@agentclientprotocol/sdk";
+import type { SessionConfigOption } from "@agentclientprotocol/sdk/unstable";
 import type { ThinkingConfig } from "@anthropic-ai/claude-agent-sdk";
 
 /** Stable id for the Thinking session config option. */

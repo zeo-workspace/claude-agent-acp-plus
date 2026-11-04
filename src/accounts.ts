@@ -28,7 +28,7 @@
  * credentials, so it stays on this side of the protocol (R6.4).
  */
 
-import type { SessionConfigOption } from "@agentclientprotocol/sdk";
+import type { SessionConfigOption } from "@agentclientprotocol/sdk/unstable";
 
 /** Stable id for the account session config option (D1). */
 export const ACCOUNT_CONFIG_ID = "account";

@@ -15,7 +15,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "crypto";
-import type { SessionNotification } from "@agentclientprotocol/sdk";
+import type { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import { AcpClient, ClaudeAcpAgent, TASKS_META_KEY } from "../acp-agent.js";
 import { FOREGROUND_SHELL_HOLD_MS, TailPoller, TaskFeed, TaskFeedPublisher } from "../task-feed.js";
 import {

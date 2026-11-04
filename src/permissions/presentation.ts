@@ -1,4 +1,4 @@
-import type { RequestPermissionRequest, ToolCallLocation } from "@agentclientprotocol/sdk";
+import type { RequestPermissionRequest, ToolCallLocation } from "@agentclientprotocol/sdk/unstable";
 import { toolInfoFromToolUse } from "../tools.js";
 
 export interface ClaudePermissionPresentationInput {
