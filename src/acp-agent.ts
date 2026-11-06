@@ -61,6 +61,7 @@ import {
   FastModeDisabledReason,
   FastModeState,
   getSessionMessages,
+  getSubagentMessages,
   listSessions,
   McpServerConfig,
   ModelInfo,
@@ -235,6 +236,9 @@ import {
   PLAN_UPDATES_CONFIG_ID,
 } from "./session-config-ids.js";
 import { withPrecompactHistory } from "./compacted-history.js";
+import { type SubagentForm, subagentForm } from "./acp-subagents.js";
+import { ChildSessionRouter, childStopReasonOf } from "./child-sessions.js";
+import { readSubagentLaunches, type SubagentLaunchRecord } from "./child-session-history.js";
 import { findTranscript } from "./transcript-path.js";
 import { parseToolResultMeta } from "./tool-result-meta.js";
 import { AccountUsageTracker } from "./account-usage.js";
@@ -260,6 +264,7 @@ import { MODE_CONFIG_ID, SessionModeManager } from "./session-mode.js";
 import {
   TASKS_CONTRACT_VERSION,
   TASKS_META_KEY,
+  type TasksSnapshot,
   normaliseStatus,
   TailPoller,
   TaskFeed,
@@ -444,6 +449,9 @@ export const TASKS_OUTPUT_METHOD = "_claude/tasks/output";
 export const TASKS_CAPABILITY_KEY = TASKS_META_KEY;
 /** Version 2 (story 041) adds `hasOutput`, `tail` and `_claude/tasks/output`. */
 export const TASKS_CAPABILITY_VERSION = TASKS_CONTRACT_VERSION;
+/** Version 3: a subagent entry names its child session (`childSessionId`).
+ *  Only a client on the subagents RFD gets it (story 065, R6.2, R6.3). */
+export const TASKS_RFD_CONTRACT_VERSION = 3;
 
 export type TasksStopRequest = { sessionId: string; taskId: string };
 export type TasksOutputRequest = { sessionId: string; taskId: string; maxBytes: number };
@@ -1571,6 +1579,94 @@ export type ToolUseCache = {
 
 /** A cached tool call's `description` input, when it is a string — or, for a
  *  shell call, its `command_description` alias (CLI 2.1.295+, upstream #1330). */
+/** What a child session is announced with, read from `task_started` and the
+ *  Agent call it names (story 065, R2.1): the Agent call's `name` or the
+ *  subagent type as the title, its short description, and its prompt. */
+function subagentLaunchOf(
+  parentSessionId: string,
+  session: Session,
+  message: {
+    task_id: string;
+    parent_task_id?: string;
+    tool_use_id?: string;
+    description: string;
+    subagent_type?: string;
+    prompt?: string;
+  },
+) {
+  const input = (session.toolUseCache[message.tool_use_id ?? ""]?.input ?? {}) as {
+    name?: unknown;
+    prompt?: unknown;
+  };
+  const name = typeof input.name === "string" && input.name.trim() ? input.name : undefined;
+  const prompt = message.prompt ?? (typeof input.prompt === "string" ? input.prompt : undefined);
+  return {
+    parentSessionId,
+    launcherTaskId: message.parent_task_id,
+    toolUseId: message.tool_use_id!,
+    agentId: message.task_id,
+    title: name ?? message.subagent_type ?? message.description,
+    description: message.description,
+    prompt,
+    cancellable: typeof session.query.stopTask === "function",
+  };
+}
+
+/** A child read back from a transcript, in the shape `ChildSessionRouter`
+ *  announces: the same title rule as a live launch (`subagentLaunchOf`). */
+function childLaunchOf(
+  parentSessionId: string,
+  session: Session | undefined,
+  toolUseId: string,
+  record: SubagentLaunchRecord,
+  input: Record<string, unknown>,
+) {
+  const text = (value: unknown) => (typeof value === "string" && value.trim() ? value : undefined);
+  const description = record.description ?? text(input.description) ?? "";
+  return {
+    parentSessionId,
+    launcherTaskId: record.launcherAgentId,
+    toolUseId,
+    agentId: record.agentId,
+    title: record.name ?? text(input.name) ?? record.agentType ?? (description || "Subagent"),
+    description,
+    prompt: text(input.prompt),
+    // History, not a task the CLI holds: no Stop until it runs again, when its
+    // live launch advertises what the SDK can stop (design.md, Security).
+    cancellable: false,
+  };
+}
+
+/** The text of a user message whose content is a string or one text block. */
+function userText(content: unknown): string | undefined {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content) && content.length === 1 && content[0]?.type === "text") {
+    return content[0].text;
+  }
+  return undefined;
+}
+
+/** A child's permission request ended by `session/cancel` on that child. */
+class ChildSessionCancelled extends Error {
+  constructor(childId: string) {
+    super(`Subagent ${childId} was cancelled`);
+  }
+}
+
+/** `client` with every `session/update` passed through the child router. */
+function withChildRouting(client: AcpClient, router: ChildSessionRouter): AcpClient {
+  return new Proxy(client, {
+    get(target, property) {
+      if (property === "sessionUpdate") {
+        return (notification: SessionNotification) =>
+          target.sessionUpdate(router.route(notification));
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 function toolDescriptionOf(cache: ToolUseCache, toolUseId: unknown): string | undefined {
   if (typeof toolUseId !== "string") return undefined;
   return shellDescription(cache[toolUseId]?.input);
@@ -2030,6 +2126,12 @@ export class ClaudeAcpAgent {
   };
   client: AcpClient;
   clientCapabilities?: ClientCapabilities;
+  /** Set at `initialize`: `rfd` when the client declared `clientCapabilities.subagents`. */
+  subagentForm?: SubagentForm;
+  /** Present only in the RFD form: moves subagent traffic to child sessions (story 065). */
+  childSessions?: ChildSessionRouter;
+  /** Open permission requests of each child, aborted when that child is cancelled. */
+  private readonly childAsks = new Map<string, Set<AbortController>>();
   logger: Logger;
   private readonly sessionModes: SessionModeManager<Session>;
   gatewayAuthRequest?: GatewayAuthRequest;
@@ -2102,6 +2204,19 @@ export class ClaudeAcpAgent {
 
   async initialize(request: InitializeRequest): Promise<InitializeResponse> {
     this.clientCapabilities = request.clientCapabilities;
+    this.subagentForm = subagentForm(request.clientCapabilities);
+    if (this.subagentForm === "rfd" && !this.childSessions) {
+      const direct = this.client;
+      const router = new ChildSessionRouter(
+        (notification) => direct.sessionUpdate(notification),
+        (line) => this.logger.log(line),
+      );
+      this.childSessions = router;
+      // The one place every `session/update` crosses — the consumer's
+      // `sendUpdate`, the task feed, hooks, the classifier — so a subagent's
+      // update cannot reach the parent by an emission site that forgot it.
+      this.client = withChildRouting(direct, router);
+    }
 
     // Bypasses standard auth by routing requests through a custom Anthropic-protocol gateway.
     // Only offered when the client advertises `auth._meta.gateway` capability.
@@ -2217,7 +2332,9 @@ export class ClaudeAcpAgent {
           claudeCode: {
             promptQueueing: true,
           },
-          [TASKS_CAPABILITY_KEY]: { version: TASKS_CAPABILITY_VERSION },
+          [TASKS_CAPABILITY_KEY]: {
+            version: this.childSessions ? TASKS_RFD_CONTRACT_VERSION : TASKS_CAPABILITY_VERSION,
+          },
           [USAGE_CAPABILITY_KEY]: { version: USAGE_CAPABILITY_VERSION },
         },
         promptCapabilities: {
@@ -2306,8 +2423,10 @@ export class ClaudeAcpAgent {
   }
 
   async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
+    this.refuseChildSession(params.sessionId, "lifecycle");
     if (this.providerUpdate) await this.providerUpdate;
     const result = await this.getOrCreateSession(params);
+    await this.restoreChildSessions(params.sessionId);
 
     // Needs to happen after we return the session
     setTimeout(() => {
@@ -2317,6 +2436,7 @@ export class ClaudeAcpAgent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    this.refuseChildSession(params.sessionId, "lifecycle");
     if (this.providerUpdate) await this.providerUpdate;
     const result = await this.getOrCreateSession(params);
 
@@ -3021,6 +3141,42 @@ export class ClaudeAcpAgent {
    *  `session/prompt`. Without the opt-in, the existing detached `prompt()` and
    *  `startedNewTurn` result are preserved for compatibility. */
   /** `_claude/tasks/stop`: stop a task the feed holds as running (R2.1, R2.2). */
+  /** `_claude/tasks` v3: each subagent entry with a child session names it
+   *  (R6.1); every other entry, and every snapshot off the RFD, is the v2
+   *  object as is (R6.3, R6.4). */
+  private withChildSessionIds(snapshot: TasksSnapshot): TasksSnapshot {
+    const router = this.childSessions;
+    if (!router) return snapshot;
+    return {
+      ...snapshot,
+      tasks: snapshot.tasks.map((task) =>
+        task.type === "subagent" && router.isChild(task.id)
+          ? { ...task, childSessionId: task.id }
+          : task,
+      ),
+    };
+  }
+
+  /** A child session is the parent's: its config is read-only, and it is
+   *  loaded, resumed and closed with its parent (story 065, R5.1, R5.2). Checked
+   *  first, so an id that names no session keeps the error it has today. */
+  private refuseChildSession(sessionId: string, operation: "config" | "lifecycle"): void {
+    if (!this.childSessions?.isChild(sessionId)) return;
+    throw RequestError.invalidParams(
+      { sessionId },
+      operation === "config"
+        ? "subagent sessions are read-only and loaded with their parent"
+        : "subagent sessions are loaded with their parent and cannot be loaded, resumed or closed alone",
+    );
+  }
+
+  /** A subagent task ended: its child, if it has one, goes idle (story 065, R2.4). */
+  private async settleChildSession(taskId: string, status: string | undefined): Promise<void> {
+    const stopReason = childStopReasonOf(status);
+    if (!stopReason || !this.childSessions?.isChild(taskId)) return;
+    await this.childSessions.settle(taskId, stopReason);
+  }
+
   async stopTask(params: TasksStopRequest): Promise<Record<string, never>> {
     const { sessionId, taskId } = params;
     return this.taskAction(
@@ -4954,6 +5110,11 @@ export class ClaudeAcpAgent {
                 if (message.subagent_type && session.activeTurn && !session.activeTurn.settled) {
                   (session.activeTurn.spawnedTaskIds ??= new Set()).add(message.task_id);
                 }
+                if (this.childSessions && message.subagent_type && message.tool_use_id) {
+                  await this.childSessions.launch(
+                    subagentLaunchOf(params.sessionId, session, message),
+                  );
+                }
                 // The spawning tool call's own `description` labels a shell
                 // task instead of its command line. Read it now: the cache
                 // entry is pruned at `tool_result`, which for a background
@@ -4975,6 +5136,7 @@ export class ClaudeAcpAgent {
                 // The task settled — no further tool calls can originate
                 // from it, so its registry entry can be dropped.
                 session.liveBackgroundTasks.delete(message.task_id);
+                await this.settleChildSession(message.task_id, message.status);
                 await endBackgroundTerminal(
                   message.task_id,
                   backgroundExitCode(message.status, message.summary),
@@ -5011,6 +5173,7 @@ export class ClaudeAcpAgent {
                   message.patch.status === "killed"
                 ) {
                   session.liveBackgroundTasks.delete(message.task_id);
+                  await this.settleChildSession(message.task_id, message.patch.status);
                   // Usually first: the notification with its summary follows
                   // but is not guaranteed, so the terminal ends here.
                   await endBackgroundTerminal(
@@ -6087,7 +6250,13 @@ export class ClaudeAcpAgent {
               }
             }
 
-            if (session.cancelled) {
+            // A parent cancel keeps its background subagents running (story
+            // 065, R3.2): in the RFD form their stream goes on to their child
+            // sessions even while the parent's cancelled turn drains.
+            if (
+              session.cancelled &&
+              !this.childSessions?.childFor(params.sessionId, parentToolUseIdOf(message))
+            ) {
               break;
             }
 
@@ -6330,7 +6499,13 @@ export class ClaudeAcpAgent {
               streamedBlocks.length = 0;
             } else if (
               message.type === "assistant" &&
-              !(session.forwardSubagentText || supportsSubagentTranscript(this.clientCapabilities))
+              !(
+                session.forwardSubagentText ||
+                supportsSubagentTranscript(this.clientCapabilities) ||
+                // A child session is the subagent's own transcript (story 065):
+                // its text belongs there, never in the parent's feed.
+                this.childSessions?.childFor(params.sessionId, message.parent_tool_use_id)
+              )
             ) {
               // Legacy clients don't understand nested transcripts. Keep the
               // historical behavior for them: subagent text/thinking remains
@@ -6615,7 +6790,59 @@ export class ClaudeAcpAgent {
   }
 
   async cancel(params: CancelNotification): Promise<void> {
+    if (this.childSessions?.isChild(params.sessionId)) {
+      await this.cancelChildSession(params.sessionId);
+      return;
+    }
     await this.cancelTurns(params, { awaitInterrupt: true });
+  }
+
+  /** Register an ask (permission or question) of `childId`, aborted when that
+   *  child is cancelled; already aborted when it was. No-op for the parent. */
+  private openChildAsk(childId: string | undefined): AbortController {
+    const controller = new AbortController();
+    if (!childId) return controller;
+    if (this.childSessions!.isCancelled(childId)) {
+      controller.abort();
+      return controller;
+    }
+    let asks = this.childAsks.get(childId);
+    if (!asks) this.childAsks.set(childId, (asks = new Set()));
+    asks.add(controller);
+    return controller;
+  }
+
+  private closeChildAsk(childId: string | undefined, controller: AbortController): void {
+    if (childId) this.childAsks.get(childId)?.delete(controller);
+  }
+
+  /** `session/cancel` naming a child stops that subagent alone: its SDK task,
+   *  never the parent's query, and its open questions are answered denied
+   *  (story 065, R3.1, R3.3). On a failed stop the state stays as reported. */
+  private async cancelChildSession(childId: string): Promise<void> {
+    const parentId = this.childSessions!.parentOf(childId)!;
+    const session = this.sessions[parentId];
+    if (!session) {
+      // The parent is gone, and its query with it: nothing is left to stop.
+      this.logger.log(
+        `[subagents/cancel] outcome=parent_gone sessionId=${logValue(parentId)} childSessionId=${logValue(childId)}`,
+      );
+      await this.childSessions!.settle(childId, "cancelled");
+      return;
+    }
+    // Join a query recreate, as `cancelTurns` does, so the stop reaches the live query.
+    if (session.queryRecreateInFlight) await session.queryRecreateInFlight;
+    try {
+      await session.query.stopTask(childId);
+    } catch (error) {
+      this.logger.log(
+        `[subagents/cancel] outcome=failed level=warn sessionId=${logValue(parentId)} childSessionId=${logValue(childId)} reason=${logValue(errorMessage(error))}`,
+      );
+      throw new Error(`Could not stop subagent ${childId}`, { cause: error });
+    }
+    for (const ask of this.childAsks.get(childId) ?? []) ask.abort();
+    this.childAsks.delete(childId);
+    await this.childSessions!.settle(childId, "cancelled");
   }
 
   /** Cancel the session's turns and interrupt the SDK query. With
@@ -6961,7 +7188,10 @@ export class ClaudeAcpAgent {
       (snapshot) =>
         this.client.sessionUpdate({
           sessionId,
-          update: { sessionUpdate: "session_info_update", _meta: { [TASKS_META_KEY]: snapshot } },
+          update: {
+            sessionUpdate: "session_info_update",
+            _meta: { [TASKS_META_KEY]: this.withChildSessionIds(snapshot) },
+          },
         }),
       undefined,
       (error) =>
@@ -7021,6 +7251,7 @@ export class ClaudeAcpAgent {
   }
 
   async closeSession(params: CloseSessionRequest): Promise<CloseSessionResponse> {
+    this.refuseChildSession(params.sessionId, "lifecycle");
     if (!this.sessions[params.sessionId]) {
       throw new Error("Session not found");
     }
@@ -7041,6 +7272,7 @@ export class ClaudeAcpAgent {
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
+    this.refuseChildSession(params.sessionId, "config");
     // A lazy Thinking recreate may be swapping the session's query right now;
     // join it (mirroring prompt()) so `setPermissionMode` below lands on the
     // replacement query after cutover instead of an about-to-close one — and
@@ -7059,6 +7291,7 @@ export class ClaudeAcpAgent {
   async setSessionConfigOption(
     params: SetSessionConfigOptionRequest,
   ): Promise<SetSessionConfigOptionResponse> {
+    this.refuseChildSession(params.sessionId, "config");
     const session = this.sessions[params.sessionId];
     if (!session) {
       throw new Error("Session not found");
@@ -7221,8 +7454,126 @@ export class ClaudeAcpAgent {
     return { configOptions: session.configOptions };
   }
 
+  /** A resumed parent's children, registered under their transcript ids but
+   *  not announced: a resume replays nothing, and a child the parent
+   *  continues is announced when it runs (story 065, R4.3). */
+  private async restoreChildSessions(sessionId: string): Promise<void> {
+    if (!this.childSessions) return;
+    const session = this.sessions[sessionId];
+    const launches = await readSubagentLaunches(CLAUDE_CONFIG_DIR, sessionId);
+    // Launchers before the subagents they launched, so each nests under its own.
+    const byDepth = [...launches].sort(([, a], [, b]) => a.depth - b.depth);
+    for (const [toolUseId, record] of byDepth) {
+      await this.childSessions.restore(childLaunchOf(sessionId, session, toolUseId, record, {}), {
+        announce: false,
+      });
+    }
+  }
+
+  /** Replay one child of a loaded parent right after the Agent call that
+   *  launched it: its announcement and prompt on the parent, then its own
+   *  transcript on its session (story 065, R4.1, R4.2). */
+  private async replayChildSession(
+    parentId: string,
+    toolUseId: string,
+    input: Record<string, unknown>,
+    record: SubagentLaunchRecord,
+    launches: Map<string, SubagentLaunchRecord>,
+    replayed: Set<string>,
+  ): Promise<void> {
+    // Each child once per load: a damaged meta naming a launch inside the
+    // child's own transcript would otherwise recurse without end.
+    if (replayed.has(record.agentId)) return;
+    replayed.add(record.agentId);
+    const launch = childLaunchOf(parentId, this.sessions[parentId], toolUseId, record, input);
+    await this.childSessions!.restore(launch, { announce: true });
+    if (this.childSessions!.parentOf(record.agentId) !== parentId) return;
+    let messages: Awaited<ReturnType<typeof getSubagentMessages>> = [];
+    let reason = "empty";
+    try {
+      messages = await getSubagentMessages(parentId, record.agentId);
+    } catch (error) {
+      reason = errorMessage(error);
+    }
+    if (messages.length === 0) {
+      // The SDK answers a missing transcript with []: only the association replays.
+      this.logger.log(
+        `[subagents/replay] outcome=no_transcript level=warn sessionId=${logValue(parentId)} childSessionId=${logValue(record.agentId)} reason=${logValue(reason)}`,
+      );
+      return;
+    }
+    const toolUseCache: ToolUseCache = {};
+    let promptSkipped = false;
+    for (const message of messages) {
+      // @ts-expect-error - untyped in SDK but we handle all of these
+      const role: "user" | "assistant" = message.message?.role;
+      // @ts-expect-error - untyped in SDK but we handle all of these
+      let content: unknown = message.message?.content;
+      if (role === "user") {
+        // The launch prompt already went out as the parent's session_message.
+        if (!promptSkipped && launch.prompt && userText(content) === launch.prompt) {
+          promptSkipped = true;
+          continue;
+        }
+        content = stripLocalCommandMetadata(content);
+        if (content === null) continue;
+      }
+      for (const notification of toAcpNotifications(
+        // @ts-expect-error - untyped in SDK but we handle all of these
+        content,
+        role,
+        parentId,
+        toolUseCache,
+        this.client,
+        this.logger,
+        {
+          registerHooks: false,
+          clientCapabilities: this.clientCapabilities,
+          cwd: this.sessions[parentId]?.cwd,
+          taskState: this.sessions[parentId]?.taskState,
+          messageId: messageIdForGrouping(message),
+        },
+      )) {
+        await this.client.sessionUpdate({ ...notification, sessionId: record.agentId });
+      }
+      // A nested subagent's launch lives in its launcher's transcript.
+      if (role === "assistant") {
+        await this.replayLaunchesIn(parentId, content, launches, replayed);
+      }
+    }
+  }
+
+  /** Replay the children launched by the Agent calls in `content`. */
+  private async replayLaunchesIn(
+    parentId: string,
+    content: unknown,
+    launches: Map<string, SubagentLaunchRecord>,
+    replayed: Set<string>,
+  ): Promise<void> {
+    for (const block of Array.isArray(content) ? content : []) {
+      const record =
+        block?.type === "tool_use" && typeof block.id === "string"
+          ? launches.get(block.id)
+          : undefined;
+      if (record) {
+        await this.replayChildSession(
+          parentId,
+          block.id,
+          block.input ?? {},
+          record,
+          launches,
+          replayed,
+        );
+      }
+    }
+  }
+
   private async replaySessionHistory(sessionId: string): Promise<void> {
     const toolUseCache: ToolUseCache = {};
+    const childLaunches = this.childSessions
+      ? await readSubagentLaunches(CLAUDE_CONFIG_DIR, sessionId)
+      : undefined;
+    const replayedChildren = new Set<string>();
     // getSessionMessages stops at the last compaction boundary; put the history
     // before it back, so a reopened compacted thread scrolls to its first prompt.
     const messages = await withPrecompactHistory(
@@ -7399,6 +7750,9 @@ export class ClaudeAcpAgent {
       )) {
         await this.client.sessionUpdate(notification);
       }
+      if (childLaunches?.size && message.type === "assistant" && parentToolUseId === null) {
+        await this.replayLaunchesIn(sessionId, content, childLaunches, replayedChildren);
+      }
     }
   }
 
@@ -7456,6 +7810,10 @@ export class ClaudeAcpAgent {
     // so emit it now if it hasn't been sent yet. The streamed tool_use chunk
     // later refines it with a `tool_call_update` rather than emitting a
     // duplicate (see `emittedToolCalls` in `toAcpNotifications`).
+    // A child's ask is registered before anything awaits, so a cancel of
+    // that child landing meanwhile still answers it (story 065, R3.3).
+    const childId = this.childSessions?.childFor(params.sessionId, parentToolUseId);
+    const childCancel = this.openChildAsk(childId);
     await this.ensureToolCallEmitted(
       params.sessionId,
       toolName,
@@ -7464,20 +7822,38 @@ export class ClaudeAcpAgent {
       parentToolUseId,
       signal,
     );
-    if (signal.aborted) throw new Error("Tool use aborted");
+    if (signal.aborted) {
+      this.closeChildAsk(childId, childCancel);
+      throw new Error("Tool use aborted");
+    }
 
     // Do not rely on every ACP client settling requestPermission after the
     // cancellation signal. The local race guarantees that Claude's tool call
     // is released even when an older or broken client ignores $/cancel_request.
+    const outgoing = childId ? { ...params, sessionId: childId } : params;
+    const requestSignal = childId ? AbortSignal.any([signal, childCancel.signal]) : signal;
+    if (childId) {
+      if (childCancel.signal.aborted) {
+        this.closeChildAsk(childId, childCancel);
+        throw new ChildSessionCancelled(childId);
+      }
+      await this.childSessions!.askOpened(childId);
+    }
     try {
       return await this.withPendingUserInput(params.sessionId, () =>
-        raceWithAbort(this.client.requestPermission(params, signal), signal),
+        raceWithAbort(this.client.requestPermission(outgoing, requestSignal), requestSignal),
       );
     } catch (error) {
       if (signal.aborted) {
         throw new Error("Tool use aborted", { cause: error });
       }
+      if (childCancel.signal.aborted) throw new ChildSessionCancelled(childId!);
       throw error;
+    } finally {
+      if (childId) {
+        this.closeChildAsk(childId, childCancel);
+        await this.childSessions!.askClosed(childId);
+      }
     }
   }
 
@@ -7621,7 +7997,13 @@ export class ClaudeAcpAgent {
           parentToolUseId,
           signal,
         );
-        return this.handleAskUserQuestion(sessionId, toolInput, toolUseID, signal);
+        return this.handleAskUserQuestion(
+          sessionId,
+          toolInput,
+          toolUseID,
+          signal,
+          this.childSessions?.childFor(sessionId, parentToolUseId),
+        );
       }
 
       // Do not auto-allow here based on the session's advertised mode. Claude
@@ -7680,16 +8062,24 @@ export class ClaudeAcpAgent {
               ),
       });
 
-      const response = await this.requestPermissionFromClient(
-        {
-          ...presentation,
-          options: permissionOptions,
-          sessionId,
-        },
-        toolName,
-        signal,
-        parentToolUseId,
-      );
+      let response: RequestPermissionResponse;
+      try {
+        response = await this.requestPermissionFromClient(
+          {
+            ...presentation,
+            options: permissionOptions,
+            sessionId,
+          },
+          toolName,
+          signal,
+          parentToolUseId,
+        );
+      } catch (error) {
+        if (error instanceof ChildSessionCancelled) {
+          return { behavior: "deny", message: "The subagent was cancelled." };
+        }
+        throw error;
+      }
       if (signal.aborted) throw new Error("Tool use aborted");
       const decodedPermission = decodeClaudePermissionResponse(
         response,
@@ -7793,19 +8183,39 @@ export class ClaudeAcpAgent {
     toolInput: Record<string, unknown>,
     toolUseID: string,
     signal: AbortSignal,
+    /** A subagent's question goes out on its child session (story 065, R2.3). */
+    childId?: string,
   ): Promise<PermissionResult> {
     const questions = extractAskUserQuestions(toolInput);
     if (!questions) {
       return { behavior: "deny", message: "AskUserQuestion called with no valid questions." };
     }
 
-    const createRequest = askUserQuestionsToCreateRequest(questions, sessionId, toolUseID);
+    const createRequest = askUserQuestionsToCreateRequest(
+      questions,
+      childId ?? sessionId,
+      toolUseID,
+    );
     let response;
+    const childCancel = this.openChildAsk(childId);
+    if (childCancel.signal.aborted) {
+      return { behavior: "deny", message: "The subagent was cancelled." };
+    }
+    const requestSignal = childId ? AbortSignal.any([signal, childCancel.signal]) : signal;
+    if (childId) await this.childSessions?.askOpened(childId);
     try {
       response = await this.withPendingUserInput(sessionId, () =>
-        this.client.unstable_createElicitation(createRequest, signal),
+        childId
+          ? raceWithAbort(
+              this.client.unstable_createElicitation(createRequest, requestSignal),
+              requestSignal,
+            )
+          : this.client.unstable_createElicitation(createRequest, signal),
       );
     } catch (error) {
+      if (childCancel.signal.aborted && !signal.aborted) {
+        return { behavior: "deny", message: "The subagent was cancelled." };
+      }
       // A cancellation we requested (signal aborted) settles as an aborted tool
       // use, matching the post-response check below.
       if (signal.aborted) {
@@ -7813,6 +8223,9 @@ export class ClaudeAcpAgent {
       }
       this.logger.error(`Failed to present AskUserQuestion elicitation: ${error}`);
       return { behavior: "deny", message: "Could not present the question to the user." };
+    } finally {
+      this.closeChildAsk(childId, childCancel);
+      if (childId) await this.childSessions?.askClosed(childId);
     }
     if (signal.aborted) {
       throw new Error("Tool use aborted");

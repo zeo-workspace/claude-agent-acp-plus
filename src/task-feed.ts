@@ -76,6 +76,9 @@ export type TaskEntry = {
   hasOutput: boolean;
   /** A running shell's last lines, sanitized; null otherwise (version 2). */
   tail: string[] | null;
+  /** The subagent's child session under the subagents RFD (version 3, story
+   *  065). Never set by the feed: added at send time, so v2 bytes cannot change. */
+  childSessionId?: string;
 };
 
 export type TasksSnapshot = { tasks: TaskEntry[] };
