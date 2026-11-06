@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.33.0...v0.34.0) (2026-11-06)
+
+
+### Features
+
+* **065:** subagents become child sessions under the ACP subagents RFD ([#199](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/199)) ([990b473](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/990b47339c7f6f8c7909c7e83006dc261101e860))
+
 ## [0.33.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.32.0...v0.33.0) (2026-11-04)
 
 
