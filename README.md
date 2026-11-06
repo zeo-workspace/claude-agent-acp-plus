@@ -39,6 +39,7 @@ On top of upstream, aimed at parity with the Claude Code VS Code extension:
 - **Per-session account selection**, and an agent name taken from the installed package
 - Permission prompts that honour the CLI's `defaultToNo` and `suppressAlwaysAllowRule`
 - **Classifier denials ask instead of failing** — in `auto` mode, a call the classifier blocks becomes a permission prompt (see [Classifier denials](#classifier-denials))
+- **Subagent sessions** — under the ACP subagents RFD, each subagent is its own read-only child session that can be cancelled alone (see [Subagent sessions](#subagent-sessions-acp-subagents-rfd))
 
 ### Nested subagent transcripts
 
@@ -50,6 +51,31 @@ with `_meta.claudeCode.subagent = true`.
 
 Clients that do not advertise the capability retain the legacy flattened behavior. In both modes,
 the normal Agent/Task tool result is preserved as the protocol-compatible fallback.
+
+### Subagent sessions (ACP subagents RFD)
+
+A client that declares `clientCapabilities.subagents` (any object, `{}` included) gets each
+Agent-tool subagent as a **child session** instead of nested updates. `true`, `null`, a string or
+`_meta["subagent-transcript"]` are not that declaration.
+
+- **Launch** — the parent session receives `subagent_update` with the child's `sessionId` (the SDK
+  agent id), `title`, `description`, `capabilities.cancel` and `state: "running"`, then a
+  `session_message` carrying the prompt the subagent was given. Both arrive before any traffic of
+  the child.
+- **Traffic** — the child's text, thinking, tool calls and permission requests carry the child's
+  `sessionId`. The parent keeps its own Agent tool call and its result.
+- **State** — `subagent_update.state` moves through `running`, `requires_action` and `idle` with a
+  stop reason (`end_turn`, `cancelled`, `error`).
+- **Cancel** — `session/cancel` on a child stops that subagent only: its open permission requests
+  are answered as cancelled, and its siblings and parent keep running. Cancelling the parent leaves
+  background subagents running.
+- **Load and restart** — `session/load` replays each child under the same id, with its title and
+  transcript and no state; a subagent resumed after an adapter restart keeps its id.
+- **Read-only** — config changes on a child are refused, and so are `session/load`,
+  `session/resume` and `session/close` of a child alone, with `-32602` (invalid params).
+
+A client that does not declare the capability sees exactly the behaviour described above under
+[Nested subagent transcripts](#nested-subagent-transcripts).
 
 ### Classifier denials
 
@@ -77,9 +103,13 @@ back in `auto`. A deny rule always wins over a grant.
 
 The agent's background shells, subagents, monitors and workflows are published as one table per
 session, under `session_info_update._meta["_claude/tasks"]`. The `initialize` response advertises
-it as `agentCapabilities._meta["_claude/tasks"] = { "version": 2 }`; clients should gate on that
+it as `agentCapabilities._meta["_claude/tasks"] = { "version": 2 }` — or `3` for a client that
+declared [subagent sessions](#subagent-sessions-acp-subagents-rfd); clients should gate on that
 capability, never on the agent's name. Version 2 added `hasOutput`, `tail` and
-`_claude/tasks/output`; a client that reads only version 1 fields keeps working.
+`_claude/tasks/output`; a client that reads only version 1 fields keeps working. Version 3 adds
+`childSessionId` to each subagent entry: the id of its child session, so a client can show one
+row for both. Every other entry, and every byte sent to a client that did not declare the
+capability, is unchanged.
 
 Each update is a **snapshot, not a delta**: `{ "tasks": [...] }` carries every live task, so a
 client replaces its list instead of merging. Each entry has `id`, `toolCallId`, `type`
