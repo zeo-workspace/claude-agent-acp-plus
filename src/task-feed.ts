@@ -348,6 +348,29 @@ export class TaskFeed {
     return change;
   }
 
+  /**
+   * The turn was cancelled (F3, proposal §5.3). Its foreground work dies with
+   * it, but the CLI does not always send the closing event, and `reconcile`
+   * only covers background tasks — so a foreground row stayed "running" until
+   * the session ended. Running foreground tasks end as `interrupted`; a held
+   * foreground shell was never shown, so it is dropped, as on a restart.
+   * Background tasks outlive the turn and are left alone.
+   */
+  onTurnCancelled(): TaskChange {
+    for (const [id, task] of this.held) {
+      if (task.background) continue;
+      this.held.delete(id);
+      this.outputs.delete(id);
+    }
+    let change: TaskChange = "none";
+    for (const task of this.tasks.values()) {
+      if (task.status !== "running" || task.background) continue;
+      this.end(task, "interrupted");
+      change = "terminal";
+    }
+    return change;
+  }
+
   /** The CLI process restarted: whatever was running did not survive it. A
    *  held shell task was never shown, so it is dropped rather than ended. */
   onProcessRestart(): TaskChange {
@@ -582,7 +605,10 @@ export class TaskFeedPublisher {
 
   dispose(options: { flush?: boolean } = {}): void {
     this.closed = true;
-    this.flushOnSettle = options.flush ?? false;
+    // A later plain dispose never cancels an earlier flush: teardownSession
+    // used to dispose again after retireTaskFeed's `{ flush: true }`, and the
+    // retirement's queued `interrupted` endings were dropped (F3).
+    this.flushOnSettle = this.flushOnSettle || (options.flush ?? false);
     this.cancelPending();
     if (this.reconcileTimer !== null) this.timers.clearTimeout(this.reconcileTimer);
     this.reconcileTimer = null;

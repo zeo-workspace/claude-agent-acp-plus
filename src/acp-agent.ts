@@ -161,6 +161,7 @@ import {
   resolvePlanUpdatesRequested,
   TODO_TOOLS_ENV,
 } from "./plan-updates.js";
+import { planRemovedUpdate, planSessionUpdate, supportsPlanOperations } from "./keyed-plan.js";
 import { handleRewindCommand, parseRewindInvocation, RewindDeps } from "./rewind-command.js";
 import { resolvePermissionMode, sessionAllowsBypass } from "./permissions/modes.js";
 import { normalizeDurablePermissionChangeSet } from "./permissions/normalization.js";
@@ -2905,13 +2906,15 @@ export class ClaudeAcpAgent {
   }
 
   private async publishTaskPlan(sessionId: string, taskState: TaskState): Promise<void> {
-    await this.client.sessionUpdate({
-      sessionId,
-      update: {
-        sessionUpdate: "plan",
-        entries: taskStateToPlanEntries(taskState),
-      },
-    });
+    const keyed = supportsPlanOperations(this.clientCapabilities);
+    // An emptied list (a conversation reset) removes the keyed plan rather
+    // than leaving an empty one on screen; a legacy client gets the empty plan
+    // it always got.
+    const update =
+      keyed && taskState.size === 0
+        ? planRemovedUpdate()
+        : planSessionUpdate(taskStateToPlanEntries(taskState), keyed);
+    await this.client.sessionUpdate({ sessionId, update });
   }
 
   /** This session's quota-window mapper, created on first use (see
@@ -3482,6 +3485,11 @@ export class ClaudeAcpAgent {
   ): void {
     session.classifierGrants.clearOnce();
     this.finishFileChangeAudit(session, turn, reason);
+    // Every cancel path settles through here. The turn's foreground tasks end
+    // with it even when the CLI omits their closing event (F3, §5.3).
+    if (reason === "cancelled" && session.taskFeed && session.taskFeedPublisher) {
+      session.taskFeedPublisher.notify(session.taskFeed.onTurnCancelled());
+    }
   }
 
   /** Publish the audit terminal for every turn path that did not reach the
@@ -7410,9 +7418,9 @@ export class ClaudeAcpAgent {
     // here the client has asked us to close the session, so signalling abort is
     // appropriate; query.close() above has already torn the subprocess down.
     session.abortController.abort();
-    // A pending throttle, retry or reconcile timer must not send to a closed
-    // session.
-    session.taskFeedPublisher?.dispose();
+    // The publisher was disposed once, with its final flush, by
+    // closeQueryStream → retireTaskFeed above (or when the stream closed
+    // earlier). Disposing it again here used to drop that flush (F3).
     delete this.sessions[sessionId];
   }
 
@@ -11822,6 +11830,8 @@ export function toAcpNotifications(
   const taskState = options?.taskState ?? new Map();
   const registerHooks = options?.registerHooks !== false;
   const supportsTerminalOutput = options?.clientCapabilities?._meta?.["terminal_output"] === true;
+  // §5.1: the task list as a keyed plan when the client applies them.
+  const keyedPlans = supportsPlanOperations(options?.clientCapabilities);
   if (typeof content === "string") {
     if (content.length === 0 || containsFileChangeAuditMarker(content)) {
       return [];
@@ -11933,10 +11943,10 @@ export function toAcpNotifications(
         } else if (chunk.name === "TodoWrite") {
           // @ts-expect-error - sometimes input is empty object or undefined
           if (Array.isArray(chunk.input?.todos)) {
-            update = {
-              sessionUpdate: "plan",
-              entries: planEntries(chunk.input as { todos: ClaudePlanEntry[] }),
-            };
+            update = planSessionUpdate(
+              planEntries(chunk.input as { todos: ClaudePlanEntry[] }),
+              keyedPlans,
+            );
           }
         } else if (isTaskTool(chunk.name)) {
           // Task* tool_use is suppressed; the plan update is emitted at
@@ -12172,10 +12182,7 @@ export function toAcpNotifications(
             }
           }
           if (shouldEmitTaskPlan) {
-            update = {
-              sessionUpdate: "plan",
-              entries: taskStateToPlanEntries(taskState),
-            };
+            update = planSessionUpdate(taskStateToPlanEntries(taskState), keyedPlans);
           }
         } else if (toolUse.name !== "TodoWrite") {
           const { _meta: toolMeta, ...toolUpdate } = toolUpdateFromToolResult(

@@ -1391,6 +1391,13 @@ export function parseTaskUpdateOutput(
   return undefined;
 }
 
+/**
+ * Ids a start-over dropped (Zeo next proposal §5.1). The CLI's own task store
+ * keeps a finished list, so a later TaskList would bring it back; while such a
+ * task is still completed it stays out of the plan.
+ */
+const retiredTaskIds = new WeakMap<TaskState, Set<string>>();
+
 export function applyTaskCreate(
   state: TaskState,
   input: TaskCreateInput | undefined,
@@ -1398,6 +1405,15 @@ export function applyTaskCreate(
 ): void {
   const taskId = output?.task?.id;
   if (!taskId || !input) return;
+  // A list starts over when a task is created after every entry completed:
+  // the finished list is not this one's history. Keyed plans are never pruned
+  // by the client, so without this the new task would join the old list.
+  if (state.size > 0 && [...state.values()].every((task) => task.status === "completed")) {
+    const retired = retiredTaskIds.get(state) ?? new Set<string>();
+    for (const id of state.keys()) retired.add(id);
+    retiredTaskIds.set(state, retired);
+    state.clear();
+  }
   state.set(taskId, {
     subject: input.subject,
     status: "pending",
@@ -1428,7 +1444,9 @@ export function applyTaskUpdate(state: TaskState, input: TaskUpdateInput | undef
 export function applyTaskList(state: TaskState, output: TaskListOutput): void {
   const previous = new Map(state);
   state.clear();
+  const retired = retiredTaskIds.get(state);
   for (const task of output.tasks) {
+    if (task.status === "completed" && retired?.has(task.id)) continue;
     const existing = previous.get(task.id);
     state.set(task.id, {
       subject: task.subject,
