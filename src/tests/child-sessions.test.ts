@@ -152,8 +152,10 @@ describe("child sessions — launch (R2.1, R2.2)", () => {
     const update = u(first!);
     expect(typeof update.title).toBe("string");
     expect(update.title.trim()).not.toBe("");
-    // The short description of the Agent call, never its prompt.
-    expect(update.description).toBe(PARSER.description);
+    // Upstream #1479: the title is the agent's name, else the Agent call's short description (never
+    // its prompt), so siblings of one type differ; the description is the role.
+    expect(update.title).toBe("parser-finder");
+    expect(update.description).toBe("Explore");
     // SubagentSessionCapabilities.cancel: an object (`{}`) means supported.
     expect(update.capabilities?.cancel).toBeTypeOf("object");
     expect(update.capabilities?.cancel).not.toBeNull();

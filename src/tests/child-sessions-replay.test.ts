@@ -146,7 +146,9 @@ describe("child sessions — replay and restore (R4.1, R4.2, R4.3)", () => {
     expect(first?.sessionId).toBe(PARENT);
     expect(typeof u(first!).title).toBe("string");
     expect(u(first!).title.trim()).not.toBe("");
-    expect(u(first!).description).toBe(PARSER.description);
+    // The same labels as a live launch (upstream #1479): title the name, description the role.
+    expect(u(first!).title).toBe("parser-finder");
+    expect(u(first!).description).toBe("Explore");
     for (const n of subagentUpdates(c.updates)) {
       expect(u(n)).not.toHaveProperty("state");
     }

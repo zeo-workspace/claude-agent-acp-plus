@@ -1605,11 +1605,27 @@ function subagentLaunchOf(
     launcherTaskId: message.parent_task_id,
     toolUseId: message.tool_use_id!,
     agentId: message.task_id,
-    title: name ?? message.subagent_type ?? message.description,
-    description: message.description,
+    ...subagentLabels(name, message.description, message.subagent_type),
     prompt,
     cancellable: typeof session.query.stopTask === "function",
   };
+}
+
+/**
+ * The RFD labels for a child (upstream #1479). The title is what tells siblings apart: the
+ * agent's name when it has one, else the task's short description (never the prompt), else its
+ * role. The description is the role, its `subagent_type`, unless the role is already the title.
+ * Before this, siblings of one type all read "Explore".
+ */
+export function subagentLabels(
+  name: string | undefined,
+  task: string | undefined,
+  role: string | undefined,
+): { title: string; description?: string } {
+  const text = (value: string | undefined) => (value && value.trim() ? value : undefined);
+  const agentRole = text(role);
+  const title = text(name) ?? text(task) ?? agentRole ?? "Subagent";
+  return { title, ...(agentRole && agentRole !== title ? { description: agentRole } : {}) };
 }
 
 /** A child read back from a transcript, in the shape `ChildSessionRouter`
@@ -1622,14 +1638,16 @@ function childLaunchOf(
   input: Record<string, unknown>,
 ) {
   const text = (value: unknown) => (typeof value === "string" && value.trim() ? value : undefined);
-  const description = record.description ?? text(input.description) ?? "";
   return {
     parentSessionId,
     launcherTaskId: record.launcherAgentId,
     toolUseId,
     agentId: record.agentId,
-    title: record.name ?? text(input.name) ?? record.agentType ?? (description || "Subagent"),
-    description,
+    ...subagentLabels(
+      record.name ?? text(input.name),
+      record.description ?? text(input.description),
+      record.agentType ?? text(input.subagent_type),
+    ),
     prompt: text(input.prompt),
     // History, not a task the CLI holds: no Stop until it runs again, when its
     // live launch advertises what the SDK can stop (design.md, Security).

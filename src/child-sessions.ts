@@ -46,7 +46,8 @@ export type ChildLaunch = {
   /** The SDK agent id — the child's session id. */
   agentId: string;
   title: string;
-  description: string;
+  /** The child's role; absent when it is already the title (upstream #1479). */
+  description?: string;
   prompt?: string;
   /** True when the SDK can stop this subagent on its own (`Query.stopTask`). */
   cancellable: boolean;
@@ -241,7 +242,7 @@ export class ChildSessionRouter {
         sessionUpdate: "subagent_update",
         sessionId: record.childId,
         title: launch.title,
-        description: launch.description,
+        ...(launch.description ? { description: launch.description } : {}),
         // `SubagentSessionCapabilities.cancel` is an object when supported;
         // absent, Zed disables Stop for the child (design.md, Security).
         ...(launch.cancellable ? { capabilities: { cancel: {} } } : {}),
