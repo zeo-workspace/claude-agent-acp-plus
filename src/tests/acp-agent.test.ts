@@ -12,6 +12,7 @@ import {
   PromptResponse,
   ReadTextFileRequest,
   ReadTextFileResponse,
+  RequestError,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
@@ -61,7 +62,13 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "crypto";
 import { readFile } from "node:fs/promises";
-import { inertEscalations, mockSessionState, userEcho, wrapQuery } from "./session-doubles.js";
+import {
+  inertEscalations,
+  mockSessionState,
+  successfulResultMessage,
+  userEcho,
+  wrapQuery,
+} from "./session-doubles.js";
 import { GrantStore } from "../classifier-escalation.js";
 import {
   GOAL_CONTROL_METHOD,
@@ -1879,6 +1886,15 @@ describe("synthetic login message (issue #863)", () => {
         content: [{ type: "text", text: "Session expired. Please run /login to sign in again." }],
       }),
     ).toBe(true);
+    // Newer CLI wording that drops "Please" (upstream #1481).
+    for (const text of [
+      "Not logged in · Run /login",
+      "Login expired · Run /login to sign in again, or re-authenticate your Anthropic profile",
+    ]) {
+      expect(
+        isSyntheticLoginMessage({ ...syntheticLoginApiMessage, content: [{ type: "text", text }] }),
+      ).toBe(true);
+    }
   });
 
   it("isSyntheticLoginMessage does not match real assistant messages", () => {
@@ -1894,6 +1910,19 @@ describe("synthetic login message (issue #863)", () => {
       isSyntheticLoginMessage({
         ...syntheticLoginApiMessage,
         content: [{ type: "text", text: "API Error: 500 Internal Server Error" }],
+      }),
+    ).toBe(false);
+    // Usage-limit banners can mention /login (to switch accounts) but are
+    // handled as usage limits, not as a sign-out.
+    expect(
+      isSyntheticLoginMessage({
+        ...syntheticLoginApiMessage,
+        content: [
+          {
+            type: "text",
+            text: "You've hit your limit · resets 5pm · run /login to switch to an API usage-billed account.",
+          },
+        ],
       }),
     ).toBe(false);
     expect(isSyntheticLoginMessage(undefined)).toBe(false);
@@ -2712,6 +2741,57 @@ describe("permission request cancellation", () => {
     } as any;
     return agent.sessions[sessionId]!;
   }
+
+  // Upstream #1466: a cancelled outcome denies background work instead of aborting it.
+  describe("a cancelled outcome", () => {
+    function setup() {
+      const mockClient = {
+        sessionUpdate: async () => {},
+        requestPermission: async (): Promise<RequestPermissionResponse> => ({
+          outcome: { outcome: "cancelled" },
+        }),
+      } as unknown as AcpClient;
+      const agent = new ClaudeAcpAgent(mockClient, { log: () => {}, error: () => {} });
+      const session = injectSession(agent, "session-1");
+      session.emittedToolCalls.add("tool-1");
+      const ask = (agentID?: string) =>
+        agent.canUseTool("session-1")("Bash", { command: "ls" }, {
+          signal: new AbortController().signal,
+          suggestions: [],
+          toolUseID: "tool-1",
+          ...(agentID ? { agentID } : {}),
+        } as any);
+      return { session, ask };
+    }
+
+    it("aborts the tool use of foreground work", async () => {
+      const { session, ask } = setup();
+      // A subagent that runs in the foreground blocks the turn like the main thread.
+      session.liveBackgroundTasks.set("agent-fg", { isSubagent: true });
+
+      await expect(ask()).rejects.toThrow("Tool use aborted");
+      await expect(ask("agent-fg")).rejects.toThrow("Tool use aborted");
+    });
+
+    it("denies the tool use of a background subagent", async () => {
+      const { session, ask } = setup();
+      session.liveBackgroundTasks.set("agent-bg", { isSubagent: true, backgrounded: true });
+      // A subagent that a background subagent started is background work too.
+      session.liveBackgroundTasks.set("agent-nested", {
+        isSubagent: true,
+        parentTaskId: "agent-bg",
+      });
+
+      for (const agentID of ["agent-bg", "agent-nested"]) {
+        await expect(ask(agentID)).resolves.toEqual({
+          behavior: "deny",
+          message: "User refused permission to run tool",
+          toolUseID: "tool-1",
+          decisionClassification: "user_reject",
+        });
+      }
+    });
+  });
 
   it("forwards the tool-call signal so a pending permission request is cancelled on abort", async () => {
     let receivedSignal: AbortSignal | undefined;
@@ -4204,6 +4284,41 @@ describe("stop reason propagation", () => {
       input,
     });
   }
+
+  it("rejects an expired login the CLI reports as invalid_request with authRequired", async () => {
+    const updates: SessionNotification[] = [];
+    const agent = new ClaudeAcpAgent(
+      {
+        sessionUpdate: async (update: SessionNotification) => {
+          updates.push(update);
+        },
+      } as unknown as AcpClient,
+      { log: () => {}, error: () => {} },
+    );
+    await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+    // An expired token with no refresh token: the CLI tags this synthetic
+    // message `invalid_request`, not `authentication_failed` (upstream #1481).
+    const text =
+      "Login expired · Run /login to sign in again, or re-authenticate your Anthropic profile";
+    const loginExpired = createAssistantError("invalid_request");
+    loginExpired.message.model = "<synthetic>";
+    loginExpired.message.content = [{ type: "text", text, citations: null }] as any;
+    injectSession(agent, [
+      loginExpired,
+      createResultMessage({
+        subtype: "success",
+        stop_reason: "end_turn",
+        is_error: true,
+        result: text,
+      }),
+    ]);
+
+    await expect(
+      agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] }),
+    ).rejects.toMatchObject({ code: RequestError.authRequired().code });
+    await agent.sessions["test-session"]?.consumer;
+    expect(JSON.stringify(updates)).not.toContain("/login");
+  });
 
   it("should return max_tokens when success result has stop_reason max_tokens", async () => {
     const agent = createMockAgent();
@@ -6043,6 +6158,56 @@ describe("stop reason propagation", () => {
     expect((err as { data: unknown }).data).toEqual({ errorKind: "rate_limit" });
   });
 
+  it.each(
+    [false, true].flatMap((typedFailures) =>
+      [undefined, "authentication_failed" as const].map((staleError) => ({
+        typedFailures,
+        staleError,
+      })),
+    ),
+  )(
+    "preserves a usage-limit failure after compaction (typed: $typedFailures, stale error: $staleError)",
+    async ({ typedFailures, staleError }) => {
+      const agent = createMockAgent();
+      if (typedFailures) (agent as any).clientCapabilities = airSessionFailureCapabilities;
+      const staleFrame = createAssistantError(staleError, "stale compaction output");
+      staleFrame.message.model = "<synthetic>";
+      injectSession(agent, [
+        {
+          type: "system",
+          subtype: "status",
+          status: null,
+          compact_result: "success",
+          uuid: "compact-completed",
+          session_id: "test-session",
+        },
+        createUsageLimitAssistantError(),
+        staleFrame,
+        createResultMessage({
+          subtype: "success",
+          stop_reason: "end_turn",
+          is_error: true,
+          result: "private provider detail",
+        }),
+      ]);
+
+      const prompt = agent.prompt({
+        sessionId: "test-session",
+        prompt: [{ type: "text", text: "test" }],
+      });
+      if (typedFailures) {
+        expect(sessionFailureFromResponse(await prompt)).toMatchObject({
+          category: "limit",
+          actions: [],
+          title:
+            "You've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit",
+        });
+      } else {
+        await expect(prompt).rejects.toMatchObject({ data: { errorKind: "rate_limit" } });
+      }
+    },
+  );
+
   it("omits errorKind data when no SDKAssistantMessage.error was observed", async () => {
     const agent = createMockAgent();
     injectSession(agent, [
@@ -6613,6 +6778,133 @@ describe("model refusal fallback handling", () => {
           u.content.text.includes("Background task declined."),
       ),
     ).toBe(false);
+  });
+});
+
+describe("MCP server startup failures", () => {
+  function setup(mcpServersStatus: { name: string; status: string; source?: string }[]) {
+    const sessionUpdate = vi.fn(async () => {});
+    const agent = new ClaudeAcpAgent({ sessionUpdate } as unknown as AcpClient, {
+      log: () => {},
+      error: () => {},
+    });
+    const init = {
+      type: "system",
+      subtype: "init",
+      session_id: "test-session",
+      mcp_servers: mcpServersStatus,
+    };
+    async function* generator(input: Pushable<any>) {
+      const iter = input[Symbol.asyncIterator]();
+      const { value: userMessage } = await iter.next();
+      yield {
+        type: "user",
+        message: userMessage.message,
+        parent_tool_use_id: null,
+        uuid: userMessage.uuid,
+        session_id: "test-session",
+        isReplay: true,
+      };
+      // init re-emits on every turn with the same statuses.
+      yield init;
+      yield init;
+      yield {
+        type: "result",
+        subtype: "success",
+        stop_reason: null,
+        is_error: false,
+        result: "",
+        errors: [],
+        duration_ms: 0,
+        duration_api_ms: 0,
+        num_turns: 1,
+        total_cost_usd: 0,
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+        modelUsage: {},
+        permission_denials: [],
+        uuid: randomUUID(),
+        session_id: "test-session",
+      };
+      yield { type: "system", subtype: "session_state_changed", state: "idle" };
+    }
+    injectGeneratorSession(agent, generator, {
+      creationParams: {
+        cwd: "/tmp",
+        mcpServers: [
+          { name: "client-fs", command: "fs-server", args: [], env: [] },
+          { name: "client-api", type: "http", url: "https://example.com/mcp", headers: [] },
+        ],
+      },
+    });
+    const updates = () =>
+      sessionUpdate.mock.calls.map((c: any[]) => (c[0] as { update: any }).update);
+    return { agent, updates };
+  }
+
+  it("sends one notice per failed client-provided server and ignores settings servers", async () => {
+    const { agent, updates } = setup([
+      { name: "client-fs", status: "failed", source: "dynamic" },
+      { name: "client-api", status: "connected", source: "dynamic" },
+      { name: "from-settings", status: "failed", source: "user" },
+    ]);
+    await agent.initialize({
+      protocolVersion: 1,
+      clientCapabilities: { session: { notices: {} } },
+    });
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "hi" }] });
+
+    expect(updates().filter((u) => u.sessionUpdate === "notice")).toEqual([
+      {
+        sessionUpdate: "notice",
+        severity: "warning",
+        title: 'MCP server "client-fs" failed to start',
+        description: "Its tools are unavailable in this session. Run /mcp for the error.",
+      },
+    ]);
+  });
+
+  // Plus has no MCP OAuth flow (upstream's supportsMcpOAuth), so a needs-auth server is always
+  // reported; upstream skips the notice when the client can run OAuth.
+  it("reports a needs-auth server", async () => {
+    const withoutUrlElicitation = setup([{ name: "client-api", status: "needs-auth" }]);
+    await withoutUrlElicitation.agent.initialize({
+      protocolVersion: 1,
+      clientCapabilities: { session: { notices: {} } },
+    });
+    await withoutUrlElicitation.agent.prompt({
+      sessionId: "test-session",
+      prompt: [{ type: "text", text: "hi" }],
+    });
+    expect(withoutUrlElicitation.updates().filter((u) => u.sessionUpdate === "notice")).toEqual([
+      {
+        sessionUpdate: "notice",
+        severity: "info",
+        title: 'MCP server "client-api" needs authentication',
+        description: "Its tools are unavailable until the server is authenticated.",
+      },
+    ]);
+  });
+
+  it("falls back to a transcript line without the notices capability", async () => {
+    const { agent, updates } = setup([{ name: "client-fs", status: "failed" }]);
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "hi" }] });
+
+    const lines = updates().filter(
+      (u) =>
+        u.sessionUpdate === "agent_message_chunk" &&
+        u._meta?.claudeCode?.kind === "mcpServerStatus",
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0].content.text).toBe(
+      '\n\n> **MCP server "client-fs" failed to start:** Its tools are unavailable in this session. Run /mcp for the error.\n\n',
+    );
   });
 });
 
@@ -9257,7 +9549,7 @@ describe("assembled assistant text fallback", () => {
     await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "1+2" }] });
 
     const chunks = updates.filter(({ update }) => update.sessionUpdate === "agent_message_chunk");
-    expect(messageChunkTexts(updates)).toEqual(["**Warning:** hook says no"]);
+    expect(messageChunkTexts(updates)).toEqual(["\n\n> **Warning:** hook says no\n\n"]);
     expect(chunks[0]?.update).toMatchObject({
       _meta: { claudeCode: { kind: "informational", level: "warning" } },
     });
@@ -9280,10 +9572,31 @@ describe("assembled assistant text fallback", () => {
     await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "1+2" }] });
 
     const chunks = updates.filter(({ update }) => update.sessionUpdate === "agent_message_chunk");
-    expect(messageChunkTexts(updates)).toEqual(["plain hook detail"]);
+    expect(messageChunkTexts(updates)).toEqual(["\n\n> plain hook detail\n\n"]);
     expect(chunks[0]?.update).toMatchObject({
       _meta: { claudeCode: { kind: "informational", level: "info" } },
     });
+  });
+
+  it("renders a multi-line hook notice as one quote with a single speaker prefix", async () => {
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      {
+        type: "system",
+        subtype: "informational",
+        content: "Stop says: token: 3 calls\nStop says: hand off now",
+        level: "notice",
+        session_id: "test-session",
+      },
+      result(),
+      idle,
+    ]);
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "1+2" }] });
+
+    expect(messageChunkTexts(updates)).toEqual([
+      "\n\n> **Notice:** Stop says: token: 3 calls\n> hand off now\n\n",
+    ]);
   });
 
   it("delivers an informational frame as a notice and still owns the result text", async () => {
@@ -16986,5 +17299,125 @@ describe("force-cancel while the consumer is sending an update (upstream #1243)"
       new Promise<string>((r) => setTimeout(() => r("never ended"), 2000)),
     ]);
     expect(outcome).toBe("cancelled");
+  });
+});
+
+// Upstream #1431 (#1389), without its AIR rows: plus has no AIR client.
+describe("foreground fork tool results", () => {
+  it.each([
+    ["plain", null],
+    ["plain nested", "toolu_outer"],
+  ] as const)("waits for the launching side's result for a %s client", async (_, parent) => {
+    const updates: SessionNotification[] = [];
+    const logger = { log: vi.fn(), error: vi.fn() };
+    const agent = new ClaudeAcpAgent(
+      {
+        sessionUpdate: async (notification: SessionNotification) => {
+          updates.push(notification);
+        },
+      } as unknown as AcpClient,
+      logger,
+    );
+    await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+    const input = new Pushable<any>();
+    const assistant = (content: unknown[], parentToolUseId: string | null) => ({
+      type: "assistant",
+      parent_tool_use_id: parentToolUseId,
+      uuid: randomUUID(),
+      session_id: "test-session",
+      message: {
+        id: randomUUID(),
+        role: "assistant",
+        model: "claude-sonnet-4-6",
+        content,
+        usage: successfulResultMessage().usage,
+      },
+    });
+    const user = (content: unknown[], parentToolUseId: string | null) => ({
+      type: "user",
+      parent_tool_use_id: parentToolUseId,
+      uuid: randomUUID(),
+      session_id: "test-session",
+      message: { role: "user", content },
+    });
+    const toolResult = (id: string, text: string) => ({
+      type: "tool_result",
+      tool_use_id: id,
+      content: [{ type: "text", text }],
+    });
+    async function* messages() {
+      const { value } = await input[Symbol.asyncIterator]().next();
+      yield userEcho(value);
+      yield assistant(
+        [
+          {
+            type: "tool_use",
+            id: "toolu_fork",
+            name: "Agent",
+            input: {
+              subagent_type: "fork",
+              run_in_background: false,
+              prompt: "Inspect the parser",
+            },
+          },
+        ],
+        parent,
+      );
+      // The fork inherits a result for its own launch. It cannot complete
+      // that call: the launching side sends the actual report later.
+      yield user([toolResult("toolu_fork", "Fork started — that fork is you.")], "toolu_fork");
+      yield assistant(
+        [
+          {
+            type: "tool_use",
+            id: "toolu_child",
+            name: "Agent",
+            input: { subagent_type: "general-purpose", prompt: "Read the parser" },
+          },
+        ],
+        "toolu_fork",
+      );
+      // Keep results of tools the fork itself called, even in a message
+      // that also carries the copied launch result.
+      yield {
+        ...user(
+          [
+            toolResult("toolu_fork", "Fork started — processing in background"),
+            toolResult("toolu_child", "child report"),
+          ],
+          "toolu_fork",
+        ),
+        // Filtering must not attribute the inherited launch sidecar to
+        // the one result that remains in this message.
+        tool_use_result: {
+          status: "completed",
+          content: [{ type: "text", text: "inherited launch report" }],
+        },
+      };
+      yield user([toolResult("toolu_fork", "fork report")], parent);
+      yield successfulResultMessage();
+      yield { type: "system", subtype: "session_state_changed", state: "idle" };
+    }
+    agent.sessions["test-session"] = mockSessionState({ query: wrapQuery(messages()), input });
+
+    await expect(
+      agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "Inspect it" }] }),
+    ).resolves.toMatchObject({ stopReason: "end_turn" });
+
+    const completed = updates.flatMap(({ update }) =>
+      update.sessionUpdate === "tool_call_update" && update.status === "completed"
+        ? [{ id: update.toolCallId, content: update.content, rawOutput: update.rawOutput }]
+        : [],
+    );
+    expect(completed.map(({ id }) => id)).toEqual(["toolu_child", "toolu_fork"]);
+    expect(completed.map(({ content }) => content)).toEqual([
+      [{ type: "content", content: { type: "text", text: "child report" } }],
+      [{ type: "content", content: { type: "text", text: "fork report" } }],
+    ]);
+    expect(completed.map(({ rawOutput }) => rawOutput)).toEqual([
+      [{ type: "text", text: "child report" }],
+      [{ type: "text", text: "fork report" }],
+    ]);
+    expect(logger.error.mock.calls.flat().join("\n")).not.toContain("wasn't tracked");
   });
 });

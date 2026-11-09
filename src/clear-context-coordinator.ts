@@ -41,6 +41,7 @@ export type ClearContextSession<Turn extends ClearContextTurn = ClearContextTurn
   turnQueue?: Turn[];
   pendingExitPlanContextReset?: ClearContextReset;
   contextUsedTokens?: number;
+  contextWindowSize: number;
   input: { push(message: SDKUserMessage): unknown };
 };
 
@@ -55,10 +56,13 @@ export type ClearContextCoordinatorHost<
     options: { publicSessionId: string; permissionMode: PermissionMode },
   ): Promise<Session>;
   applyFastMode(session: Session, enabled: boolean): Promise<void>;
+  /** Publishes the fresh context's mode, config options, and usage: the
+   *  context starts empty in a window of `contextWindowSize` tokens (upstream #1484). */
   publishSessionState(
     sessionId: string,
     mode: PermissionMode,
     configOptions: SessionConfigOption[],
+    contextWindowSize: number,
   ): Promise<void>;
   continuationMessage(sessionId: string, plan: string, promptUuid: string): SDKUserMessage;
   ensureConsumer(session: Session, sessionId: string): void;
@@ -151,7 +155,12 @@ export async function continuePlanInFreshContext<
   freshSession.contextUsedTokens = 0;
 
   try {
-    await host.publishSessionState(sessionId, reset.mode, freshSession.configOptions);
+    await host.publishSessionState(
+      sessionId,
+      reset.mode,
+      freshSession.configOptions,
+      freshSession.contextWindowSize,
+    );
   } catch (error) {
     host.logError("Failed to publish clear-context session state:", error);
   }

@@ -518,6 +518,11 @@ export function toolInfoFromToolUse(
       };
     }
 
+    // EnterPlanMode switches the session to plan mode, so it has the `switch_mode` kind like
+    // ExitPlanMode (upstream #1467, agentclientprotocol/agent-client-protocol#2543).
+    case "EnterPlanMode":
+      return { title: "EnterPlanMode", kind: "switch_mode", content: [] };
+
     case "ExitPlanMode": {
       const planInput = toolUse.input as { plan?: string } | undefined;
       return {
@@ -1549,6 +1554,12 @@ export const registerHookCallback = (
     onPostToolUseHook,
   };
 };
+
+/* Drops a tool's callbacks when no PostToolUse hook will come for it: a server tool, such as
+   the advisor, settles from its result in assistant content (upstream #1247). */
+export function unregisterHookCallback(toolUseID: string): void {
+  delete toolUseCallbacks[toolUseID];
+}
 
 /* A callback for Claude Code that is called when receiving a PostToolUse hook */
 export const createPostToolUseHook =

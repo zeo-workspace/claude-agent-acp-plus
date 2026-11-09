@@ -78,6 +78,7 @@ import {
   SDKMessage,
   SDKMessageOrigin,
   SDKPartialAssistantMessage,
+  SDKSystemMessage,
   SDKUserMessage,
   SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -197,10 +198,12 @@ import {
 } from "./file-change-audit.js";
 import {
   clientSupportsNotices,
+  collapseHookSpeaker,
   MAX_NOTICE_TITLE_LENGTH,
   normalizeNoticeText,
   noticeOrTranscriptUpdate,
   sentenceCase,
+  type SessionNotice,
   splitNoticeText,
 } from "./session-notices.js";
 import {
@@ -216,6 +219,7 @@ import {
   planEntries,
   registerHookCallback,
   shellDescription,
+  unregisterHookCallback,
   TaskState,
   taskStateToPlanEntries,
   toolInfoFromToolUse,
@@ -258,6 +262,7 @@ import {
   structuredUsageMarkdown,
   syntheticLocalCommand,
 } from "./usage-markdown.js";
+import { STARTUP_FAILURE_RESULTS_ENV, startupFailureError } from "./startup-failure.js";
 
 export { DEFAULT_AGENT_ID, EFFORT_CONFIG_ID } from "./session-config-ids.js";
 import { MODE_CONFIG_ID, SessionModeManager } from "./session-mode.js";
@@ -868,6 +873,10 @@ export type Session = {
   /** Serialized `system`/init `plugin_errors` last logged, so the per-turn
    *  init re-emit logs a plugin load failure once, not every turn. */
   loggedPluginErrors?: string;
+  /** Names of client-provided MCP servers already reported as failed or
+   *  needing authentication. `system`/init re-emits on every turn with the
+   *  same statuses, and each server is reported once per session. */
+  reportedMcpServers?: Set<string>;
   /** The long-lived consumer task. Lazily started on the first `prompt()` and
    *  kept alive for the session so between-turn/background messages are still
    *  drained and forwarded. */
@@ -1167,6 +1176,11 @@ export type Session = {
     {
       parentToolUseId?: string;
       isSubagent: boolean;
+      /** Upstream #1466: where the task runs, from `task_started.is_backgrounded` and later
+       *  `task_updated` patches, and the task that launched it. Together they answer
+       *  `blocksForeground`: a cancelled permission request of background work is a denial. */
+      backgrounded?: boolean;
+      parentTaskId?: string;
       /** Absent-from-level lifecycle, one field so the illegal
        *  armed-but-not-ended state is unrepresentable: undefined = live per
        *  the level signal; "ended" = a level omitted the task (holds stop
@@ -1605,11 +1619,27 @@ function subagentLaunchOf(
     launcherTaskId: message.parent_task_id,
     toolUseId: message.tool_use_id!,
     agentId: message.task_id,
-    title: name ?? message.subagent_type ?? message.description,
-    description: message.description,
+    ...subagentLabels(name, message.description, message.subagent_type),
     prompt,
     cancellable: typeof session.query.stopTask === "function",
   };
+}
+
+/**
+ * The RFD labels for a child (upstream #1479). The title is what tells siblings apart: the
+ * agent's name when it has one, else the task's short description (never the prompt), else its
+ * role. The description is the role, its `subagent_type`, unless the role is already the title.
+ * Before this, siblings of one type all read "Explore".
+ */
+export function subagentLabels(
+  name: string | undefined,
+  task: string | undefined,
+  role: string | undefined,
+): { title: string; description?: string } {
+  const text = (value: string | undefined) => (value && value.trim() ? value : undefined);
+  const agentRole = text(role);
+  const title = text(name) ?? text(task) ?? agentRole ?? "Subagent";
+  return { title, ...(agentRole && agentRole !== title ? { description: agentRole } : {}) };
 }
 
 /** A child read back from a transcript, in the shape `ChildSessionRouter`
@@ -1622,19 +1652,36 @@ function childLaunchOf(
   input: Record<string, unknown>,
 ) {
   const text = (value: unknown) => (typeof value === "string" && value.trim() ? value : undefined);
-  const description = record.description ?? text(input.description) ?? "";
   return {
     parentSessionId,
     launcherTaskId: record.launcherAgentId,
     toolUseId,
     agentId: record.agentId,
-    title: record.name ?? text(input.name) ?? record.agentType ?? (description || "Subagent"),
-    description,
+    ...subagentLabels(
+      record.name ?? text(input.name),
+      record.description ?? text(input.description),
+      record.agentType ?? text(input.subagent_type),
+    ),
     prompt: text(input.prompt),
     // History, not a task the CLI holds: no Stop until it runs again, when its
     // live launch advertises what the SDK can stop (design.md, Security).
     cancellable: false,
   };
+}
+
+/** Whether a permission request from `agentID` belongs to work that blocks the turn: the main
+ *  thread (no agent id), a foreground subagent, or a subagent launched by one. A task this
+ *  session never registered is not foreground work (upstream #1466, `blocksForeground`). */
+function blocksForeground(session: Session, agentID: string | undefined): boolean {
+  const seen = new Set<string>();
+  for (let id = agentID; id !== undefined && !seen.has(id);) {
+    seen.add(id);
+    const task = session.liveBackgroundTasks.get(id);
+    if (!task) return false;
+    if (task.backgrounded) return false;
+    id = task.parentTaskId;
+  }
+  return true;
 }
 
 /** The text of a user message whose content is a string or one text block. */
@@ -1988,6 +2035,17 @@ export function isLocalCommandMetadata(content: unknown): boolean {
 }
 
 /**
+ * True when CLI error text tells the user to sign in with `/login`. The CLI
+ * words this several ways — "Not logged in · Please run /login", "Not logged
+ * in · Run /login", "Login expired · Run /login to sign in again, or
+ * re-authenticate your Anthropic profile" — so match the "run /login"
+ * instruction rather than one sentence.
+ */
+export function isLoginRequiredText(text: string): boolean {
+  return /\brun \/login\b/i.test(text);
+}
+
+/**
  * True for the synthetic assistant message the CLI injects into the transcript
  * when a turn fails authentication (e.g. "Not logged in · Please run /login",
  * "Session expired. Please run /login to sign in again."). The `/login`
@@ -1999,9 +2057,13 @@ export function isLocalCommandMetadata(content: unknown): boolean {
  * session/load even after the user has logged back in.
  *
  * Takes the API message (`message.message`), which replay only knows as
- * `unknown`. The persisted record's structured `error: "authentication_failed"`
- * marker is stripped by `getSessionMessages`, so the synthetic model + text is
- * all both paths have to match on.
+ * `unknown`. The persisted record's structured `error` marker is stripped by
+ * `getSessionMessages`, and the CLI does not always set it to
+ * `authentication_failed` anyway: an expired login with no refresh token
+ * ("Login expired · Run /login to sign in again, …") arrives as
+ * `invalid_request`. So the synthetic model + text is what both paths match on.
+ * Usage-limit banners are excluded because some of them also mention `/login`
+ * (to switch accounts) and have their own handling.
  */
 export function isSyntheticLoginMessage(apiMessage: unknown): boolean {
   if (!apiMessage || typeof apiMessage !== "object") {
@@ -2016,7 +2078,8 @@ export function isSyntheticLoginMessage(apiMessage: unknown): boolean {
     !!block &&
     block.type === "text" &&
     typeof block.text === "string" &&
-    block.text.includes("Please run /login")
+    isLoginRequiredText(block.text) &&
+    !isSyntheticUsageLimitMessage(apiMessage)
   );
 }
 
@@ -3071,6 +3134,50 @@ export class ClaudeAcpAgent {
     const refreshed = await pending;
     log(refreshed ? "published" : "nothing", coalesced ? "coalesced" : undefined);
     return { refreshed };
+  }
+
+  /** Upstream #1464: a session notice when a client-provided MCP server reports `failed` or
+   *  `needs-auth` at init, once per server per session. Plus has no MCP OAuth flow, so a
+   *  `needs-auth` server is always reported; its tools stay unavailable until it is authenticated. */
+  private async reportMcpServerStartupFailures(
+    session: Session,
+    servers: SDKSystemMessage["mcp_servers"] | undefined,
+    supportsNotices: boolean,
+    sendUpdate: (notification: SessionNotification) => Promise<void>,
+    sessionId: string,
+  ): Promise<void> {
+    if (!servers?.length) return;
+    const clientServers = new Set(
+      (session.creationParams?.mcpServers ?? []).map((server) => server.name),
+    );
+    for (const server of servers) {
+      if (!clientServers.has(server.name) || session.reportedMcpServers?.has(server.name)) {
+        continue;
+      }
+      let notice: SessionNotice;
+      if (server.status === "failed") {
+        notice = {
+          severity: "warning",
+          title: `MCP server "${server.name}" failed to start`,
+          description: "Its tools are unavailable in this session. Run /mcp for the error.",
+        };
+      } else if (server.status === "needs-auth") {
+        notice = {
+          severity: "info",
+          title: `MCP server "${server.name}" needs authentication`,
+          description: "Its tools are unavailable until the server is authenticated.",
+        };
+      } else {
+        continue;
+      }
+      (session.reportedMcpServers ??= new Set()).add(server.name);
+      await sendUpdate({
+        sessionId,
+        update: noticeOrTranscriptUpdate(notice, supportsNotices, undefined, {
+          claudeCode: { kind: "mcpServerStatus", server: server.name, status: server.status },
+        }),
+      });
+    }
   }
 
   private async publishGoalFromPrompt(
@@ -4591,6 +4698,13 @@ export class ClaudeAcpAgent {
                     }
                   }
                 }
+                await this.reportMcpServerStartupFailures(
+                  session,
+                  message.mcp_servers,
+                  supportsNotices,
+                  sendUpdate,
+                  params.sessionId,
+                );
                 break;
               case "status": {
                 // Compaction is reported as ONE tool lifecycle rather than the
@@ -5037,10 +5151,11 @@ export class ClaudeAcpAgent {
                   }
                 }
                 const severity = message.level === "warning" ? "warning" : "info";
+                const transcriptContent = collapseHookSpeaker(message.content);
                 const transcriptText =
                   message.level === "info"
-                    ? message.content
-                    : `**${sentenceCase(message.level)}:** ${message.content}`;
+                    ? transcriptContent
+                    : `**${sentenceCase(message.level)}:** ${transcriptContent}`;
                 await sendUpdate({
                   sessionId: params.sessionId,
                   update: noticeOrTranscriptUpdate(
@@ -5106,6 +5221,10 @@ export class ClaudeAcpAgent {
                 session.liveBackgroundTasks.set(message.task_id, {
                   parentToolUseId: message.tool_use_id,
                   isSubagent: !!message.subagent_type,
+                  ...(message.is_backgrounded !== undefined
+                    ? { backgrounded: message.is_backgrounded }
+                    : {}),
+                  ...(message.parent_task_id ? { parentTaskId: message.parent_task_id } : {}),
                 });
                 if (message.subagent_type && session.activeTurn && !session.activeTurn.settled) {
                   (session.activeTurn.spawnedTaskIds ??= new Set()).add(message.task_id);
@@ -5161,6 +5280,11 @@ export class ClaudeAcpAgent {
                     `[task/late-run] dropped=task_updated task=${message.task_id} run=${message.run_id}`,
                   );
                   break;
+                }
+                // A task moved to the background no longer blocks the foreground (#1466).
+                if (message.patch.is_backgrounded !== undefined) {
+                  const task = session.liveBackgroundTasks.get(message.task_id);
+                  if (task) task.backgrounded = message.patch.is_backgrounded;
                 }
                 // terminal-status task_updated patch and a (deduplicated)
                 // task_notification when a task settles, but only the patch is
@@ -5472,7 +5596,7 @@ export class ClaudeAcpAgent {
                     message.stop_reason === "refusal" ||
                     ("result" in message &&
                       message.is_error &&
-                      message.result.includes("Please run /login"));
+                      isLoginRequiredText(message.result));
                   if (goalCommandFailed) {
                     await this.publishGoal(params.sessionId, pendingGoalUpdate.previous ?? null);
                   }
@@ -5654,7 +5778,7 @@ export class ClaudeAcpAgent {
               // drained hold at their results is as good as the idle
               // fallback.) Then stop: everything below is user-turn
               // lifecycle, and an autonomous outcome must never touch it —
-              // its is_error or "Please run /login" text would otherwise
+              // its is_error or "run /login" text would otherwise
               // failActive a live turn (the held one, or the user's next
               // prompt) whose own result recorded a different outcome.
               if (isAutonomousResult) {
@@ -5801,7 +5925,7 @@ export class ClaudeAcpAgent {
 
               switch (message.subtype) {
                 case "success": {
-                  if (message.is_error && message.result.includes("Please run /login")) {
+                  if (message.is_error && isLoginRequiredText(message.result)) {
                     await failActiveWithSessionFailure(
                       "auth_required",
                       RequestError.authRequired(),
@@ -6272,6 +6396,13 @@ export class ClaudeAcpAgent {
               message.message.model === "<synthetic>" &&
               compaction.hasDeliveredOutput
             ) {
+              if (isSyntheticUsageLimitMessage(message.message)) {
+                lastAssistantWasUsageLimit = true;
+                lastAssistantFailureTitle = assistantMessageText(message.message);
+                if (message.error) {
+                  lastAssistantError = message.error;
+                }
+              }
               break;
             }
 
@@ -6436,6 +6567,7 @@ export class ClaudeAcpAgent {
             }
 
             let content: typeof message.message.content;
+            let toolUseResult = message.type === "user" ? message.tool_use_result : undefined;
             if (message.type === "assistant" && message.parent_tool_use_id === null) {
               // Top-level assistant message: each text/thinking block may have
               // already been streamed live as deltas. Diff each against what
@@ -6515,6 +6647,22 @@ export class ClaudeAcpAgent {
               content = message.message.content.filter(
                 (item) => item.type !== "text" && item.type !== "thinking",
               );
+            } else if (
+              message.parent_tool_use_id !== null &&
+              Array.isArray(message.message.content)
+            ) {
+              // Upstream #1431 (#1389): a foreground fork inherits a placeholder result for its
+              // own launch. It completed the Agent call and dropped its tracked state, so the
+              // fork's real report, arriving later, was lost. Only the launching side completes
+              // that call. The message-level sidecar cannot describe a remaining result once its
+              // launch result is removed.
+              const launchId = message.parent_tool_use_id;
+              content = (
+                message.message.content as Array<{ type: string; tool_use_id?: string }>
+              ).filter(
+                (block) => block.type !== "tool_result" || block.tool_use_id !== launchId,
+              ) as typeof message.message.content;
+              if (content.length !== message.message.content.length) toolUseResult = undefined;
             } else {
               content = message.message.content;
             }
@@ -6552,7 +6700,7 @@ export class ClaudeAcpAgent {
                 taskState: session.taskState,
                 emittedToolCalls: session.emittedToolCalls,
                 messageId: messageIdForGrouping(message),
-                toolUseResult: message.type === "user" ? message.tool_use_result : undefined,
+                toolUseResult,
                 // On the wire since CLI 2.1.216 but not in SDKUserMessage's
                 // type, hence the cast. Validated by parseToolResultMeta.
                 toolResultMeta:
@@ -7391,17 +7539,6 @@ export class ClaudeAcpAgent {
         : [];
     let validValue = allValues.find((o) => o.value === params.value);
 
-    // The option's reported currentValue is always a valid target, even when
-    // it has no options entry: a session running an out-of-picker model
-    // (resumed onto an allowlist-excluded model, or a refusal fallback)
-    // reports a currentValue that isn't selectable, and a client
-    // round-tripping it must not get "Invalid value". It flows through the
-    // normal apply path below — re-asserting an already-current value is
-    // harmless and can repair SDK drift.
-    if (!validValue && option.currentValue === params.value) {
-      validValue = { value: params.value, name: params.value };
-    }
-
     // For model options, fall back to resolveModelPreference when the exact
     // value doesn't match.  This lets callers use human-friendly aliases like
     // "opus" or "sonnet" instead of full model IDs like "claude-opus-4-6".
@@ -7628,7 +7765,7 @@ export class ClaudeAcpAgent {
         replaySession.messageIdToUuid.set(replayMessageId, message.uuid);
       }
 
-      // The live prompt loop converts the synthetic "Please run /login"
+      // The live prompt loop converts the synthetic "run /login"
       // assistant message into an authRequired error instead of showing its
       // TUI-specific text; skip it on replay too (issue #863).
       if (message.type === "assistant" && isSyntheticLoginMessage(message.message)) {
@@ -8081,6 +8218,23 @@ export class ClaudeAcpAgent {
         throw error;
       }
       if (signal.aborted) throw new Error("Tool use aborted");
+      // On `session/cancel` the client answers every open permission request
+      // `cancelled`, including those of a background subagent, which the
+      // cancel does not stop. Answer such a request with a denial so the
+      // subagent reads "the user refused" and goes on. Throwing instead makes
+      // Claude Code deny it as "Tool permission request failed".
+      if (
+        response.outcome?.outcome === "cancelled" &&
+        this.sessions[sessionId] === session &&
+        !blocksForeground(session, agentID)
+      ) {
+        return {
+          behavior: "deny",
+          message: "User refused permission to run tool",
+          toolUseID,
+          decisionClassification: "user_reject",
+        };
+      }
       const decodedPermission = decodeClaudePermissionResponse(
         response,
         toolName,
@@ -8138,19 +8292,21 @@ export class ClaudeAcpAgent {
 
   /**
    * Handle elicitation requests that originate from MCP servers by forwarding
-   * them to the client over ACP. Modes the client did not advertise (or
-   * requests we can't represent) are declined.
+   * them to the client over ACP. Only the user's own decline reaches the MCP
+   * server as `decline`. A request the user never saw, because the client did
+   * not advertise its mode, we can't represent it, or the client answered with
+   * an error, is a `cancel`.
    */
   private handleMcpElicitation(sessionId: string, support: ElicitationSupport): OnElicitation {
     return async (request, { signal }) => {
       const isUrl = request.mode === "url";
       if ((isUrl && !support.url) || (!isUrl && !support.form)) {
-        return { action: "decline" };
+        return { action: "cancel" };
       }
 
       const createRequest = mcpElicitationToCreateRequest(request, sessionId);
       if (!createRequest) {
-        return { action: "decline" };
+        return { action: "cancel" };
       }
 
       try {
@@ -8167,8 +8323,11 @@ export class ClaudeAcpAgent {
         if (signal.aborted) {
           return { action: "cancel" };
         }
+        // The client answered with an error, e.g. -32602 for a form it cannot
+        // render, so the user never saw the request. MCP's `decline` means the
+        // user refused; `cancel` means they made no explicit choice.
         this.logger.error(`Failed to forward MCP elicitation: ${error}`);
-        return { action: "decline" };
+        return { action: "cancel" };
       }
     };
   }
@@ -9439,6 +9598,7 @@ export class ClaudeAcpAgent {
       ...providerEnv,
       // Opt-in to session state events like when the agent is idle
       CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
+      ...STARTUP_FAILURE_RESULTS_ENV,
     };
     // Plan updates (story 062): the todo tools are on unless an env the user
     // wrote -- this spawn env or the settings tier the CLI applies after it --
@@ -9576,6 +9736,36 @@ export class ClaudeAcpAgent {
               ],
             }
           : {}),
+        // Upstream #1496: a subagent's working directory, from its own SubagentStart hook,
+        // which Claude Code runs (and waits for) before the child's first model request.
+        ...(this.childSessions
+          ? {
+              SubagentStart: [
+                ...(userProvidedOptions?.hooks?.SubagentStart || []),
+                {
+                  hooks: [
+                    async (input: { agent_id?: unknown; cwd?: unknown }) => {
+                      const childSessions = this.childSessions;
+                      if (
+                        childSessions &&
+                        typeof input.agent_id === "string" &&
+                        typeof input.cwd === "string"
+                      ) {
+                        await childSessions
+                          .reportCwd(input.agent_id, input.cwd, params.cwd)
+                          .catch((error) =>
+                            this.logger.error(
+                              `Session ${sessionId}: failed to report subagent cwd: ${error}`,
+                            ),
+                          );
+                      }
+                      return { continue: true };
+                    },
+                  ],
+                },
+              ],
+            }
+          : {}),
         TaskCreated: [
           ...(userProvidedOptions?.hooks?.TaskCreated || []),
           {
@@ -9648,6 +9838,13 @@ export class ClaudeAcpAgent {
     try {
       initializationResult = await q.initializationResult();
     } catch (error) {
+      // The CLI refused or exited: release the query so nothing of it is left behind (upstream
+      // closes it here too).
+      try {
+        q.close();
+      } catch (closeError) {
+        this.logger.error(`Failed to close a query that did not initialize: ${closeError}`);
+      }
       if (
         creationOpts.resume &&
         error instanceof Error &&
@@ -9656,7 +9853,9 @@ export class ClaudeAcpAgent {
       ) {
         throw RequestError.resourceNotFound(sessionId);
       }
-      throw error;
+      // Upstream #1508: the CLI's own reason (bad proxy URL, wrong org sign-in, …) as an ACP
+      // error, instead of "Claude Code process exited with code 1".
+      throw startupFailureError(error) ?? error;
     }
 
     if (
@@ -10430,6 +10629,21 @@ export function buildConfigOptions(
       }),
     },
   ];
+  // Upstream #1463: ACP requires `currentValue` to be one of `options`
+  // (agent-client-protocol#2557). A session can run a model the picker does not list --
+  // resumed onto a model the `availableModels` allowlist excludes, or switched by a refusal
+  // fallback -- so list it as its own entry. It is not added to `availableModels`, so the
+  // next rebuild after switching to a listed model drops it.
+  const modelOption = options[1] as Extract<SessionConfigOption, { type: "select" }>;
+  const modelRows = modelOption.options as Array<{ value: string; name: string }>;
+  if (!modelRows.some((row) => row.value === models.currentModelId)) {
+    const info = modelInfos.find((model) => model.value === models.currentModelId);
+    modelRows.push({
+      value: models.currentModelId,
+      name: info?.displayName || models.currentModelId,
+      ...(info?.description ? { description: info.description } : {}),
+    });
+  }
 
   // Add effort level option based on the currently selected model
   const currentModelInfo = modelInfos.find((m) => m.value === models.currentModelId);
@@ -11145,16 +11359,31 @@ async function getAvailableModels(
       // not the raw catalog upstream maps here: the filter is visibility-only,
       // so preference resolution and capability lookups elsewhere keep reading
       // the unfiltered catalog (R4.3).
-      availableModels: pickerModels.map((model) => ({
-        modelId: model.value,
-        name: model.displayName,
-        description: model.description,
-      })),
+      availableModels: withDistinctModelNames(
+        pickerModels.map((model) => ({
+          modelId: model.value,
+          name: model.displayName,
+          description: model.description,
+        })),
+      ),
       currentModelId: currentModel.value,
     },
     resumedContextWindow,
     resumedContextUsedTokens,
   };
+}
+
+/** Upstream #1286 (issue #1246): an allowlist can list an alias and pinned ids that inherit the
+ *  same SDK label, so a name-only picker shows identical rows. A name that occurs more than once
+ *  gets its model id appended; every row stays, and distinct names are unchanged. */
+export function withDistinctModelNames<T extends { modelId: string; name: string }>(
+  models: T[],
+): T[] {
+  const counts = new Map<string, number>();
+  for (const model of models) counts.set(model.name, (counts.get(model.name) ?? 0) + 1);
+  return models.map((model) =>
+    counts.get(model.name) === 1 ? model : { ...model, name: `${model.name} (${model.modelId})` },
+  );
 }
 
 function getAvailableSlashCommands(
@@ -11769,6 +11998,38 @@ export function toAcpNotifications(
         break;
       }
 
+      case "advisor_tool_result": {
+        // Advisor results arrive in assistant content, including encrypted advice.
+        // Resolve the server tool through the normal result path without rendering
+        // opaque ciphertext. Server tools have no later PostToolUse hook to await.
+        const result = chunk.content;
+        unregisterHookCallback(chunk.tool_use_id);
+        output.push(
+          ...toAcpNotifications(
+            [
+              {
+                type: "tool_result",
+                tool_use_id: chunk.tool_use_id,
+                is_error: result.type === "advisor_tool_result_error",
+                content:
+                  result.type === "advisor_result"
+                    ? result.text
+                    : result.type === "advisor_redacted_result"
+                      ? "Advisor guidance applied server-side."
+                      : `Advisor error: ${result.error_code}`,
+              },
+            ],
+            role,
+            sessionId,
+            toolUseCache,
+            client,
+            logger,
+            options,
+          ),
+        );
+        break;
+      }
+
       case "tool_result":
       case "tool_search_tool_result":
       case "web_fetch_tool_result":
@@ -11959,7 +12220,6 @@ export function toAcpNotifications(
       case "container_upload":
       case "compaction":
       case "compaction_delta":
-      case "advisor_tool_result":
       case "fallback":
       case "mcp_tool_listing":
         break;

@@ -171,7 +171,7 @@ export class ExitPlanCoordinator<
     try {
       const clearContextHost: ClearContextCoordinatorHost<Session, Turn> = {
         ...this.host,
-        publishSessionState: async (id, mode, configOptions) => {
+        publishSessionState: async (id, mode, configOptions, contextWindowSize) => {
           await this.host.sessionUpdate({
             sessionId: id,
             update: { sessionUpdate: "current_mode_update", currentModeId: mode },
@@ -179,6 +179,13 @@ export class ExitPlanCoordinator<
           await this.host.sessionUpdate({
             sessionId: id,
             update: { sessionUpdate: "config_option_update", configOptions },
+          });
+          // Upstream #1484: otherwise the client shows the old context's usage until the
+          // fresh context first reports its own. `used: 0` understates it slightly (the
+          // system prompt and the plan) until Claude's next usage report.
+          await this.host.sessionUpdate({
+            sessionId: id,
+            update: { sessionUpdate: "usage_update", used: 0, size: contextWindowSize },
           });
         },
         continuationMessage: (id, plan, promptUuid) => ({

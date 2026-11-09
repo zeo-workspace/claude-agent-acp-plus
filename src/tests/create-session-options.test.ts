@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { RequestError, SessionNotification } from "@agentclientprotocol/sdk/unstable";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import type { AcpClient, ClaudeAcpAgent as ClaudeAcpAgentType } from "../acp-agent.js";
+import { startupFailure } from "./helpers.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,6 +11,8 @@ let capturedOptions: Options | undefined;
 let contextUsageResult: (() => Promise<{ rawMaxTokens: number; model?: string }>) | undefined;
 let contextUsageCalls: Array<{ detail?: "summary" | "full" } | undefined> = [];
 let interruptImpl: (() => Promise<undefined>) | undefined;
+/** Upstream #1508: when set, `initializationResult()` rejects with it. */
+let initError: Error | undefined;
 let closeSpy: ReturnType<typeof vi.fn<() => void>>;
 vi.mock("@anthropic-ai/claude-agent-sdk", async () => {
   const actual = await vi.importActual<typeof import("@anthropic-ai/claude-agent-sdk")>(
@@ -23,16 +26,19 @@ vi.mock("@anthropic-ai/claude-agent-sdk", async () => {
       return makeMockQuery({
         interrupt: () => (interruptImpl ? interruptImpl() : Promise.resolve(undefined)),
         close: () => closeSpy(),
-        initializationResult: async () => ({
-          models: [
-            {
-              value: "claude-sonnet-4-6",
-              displayName: "Claude Sonnet",
-              description: "Fast",
-              supportsAutoMode: true,
-            },
-          ],
-        }),
+        initializationResult: async () => {
+          if (initError) throw initError;
+          return {
+            models: [
+              {
+                value: "claude-sonnet-4-6",
+                displayName: "Claude Sonnet",
+                description: "Fast",
+                supportsAutoMode: true,
+              },
+            ],
+          };
+        },
         getContextUsage: (opts?: { detail?: "summary" | "full" }) => {
           contextUsageCalls.push(opts);
           return contextUsageResult ? contextUsageResult() : Promise.resolve(DEFAULT_CONTEXT_USAGE);
@@ -68,6 +74,7 @@ describe("createSession options merging", () => {
     contextUsageResult = undefined;
     contextUsageCalls = [];
     interruptImpl = undefined;
+    initError = undefined;
     closeSpy = vi.fn<() => void>();
 
     vi.resetModules();
@@ -619,6 +626,36 @@ describe("createSession options merging", () => {
     });
   });
 
+  describe("startup failures", () => {
+    it("asks Claude Code to report why it could not start", async () => {
+      await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
+      expect(capturedOptions?.env?.CLAUDE_CODE_STARTUP_FAILURE_RESULTS).toBe("1");
+    });
+
+    it.each([
+      ["proxy_invalid", RequestError.internalError().code, "Internal error"],
+      ["gateway_signin_required", RequestError.authRequired().code, "Authentication required"],
+      ["org_pin_mismatch", RequestError.authRequired().code, "Authentication required"],
+      ["org_config_refused", RequestError.authRequired().code, "Authentication required"],
+      ["cwd_unavailable", RequestError.invalidParams().code, "Invalid params"],
+    ])("rejects with %s as code %i", async (reason, code, prefix) => {
+      initError = startupFailure(reason, "Fix the setting and restart Claude Code.");
+      await expect(agent.newSession({ cwd: process.cwd(), mcpServers: [] })).rejects.toMatchObject({
+        code,
+        message: `${prefix}: Fix the setting and restart Claude Code.`,
+        data: { startupFailureReason: reason },
+      });
+      expect(closeSpy).toHaveBeenCalled();
+    });
+
+    it("passes on an exit error that names no reason", async () => {
+      initError = new Error("Claude Code process exited with code 1. stderr: boom");
+      await expect(agent.newSession({ cwd: process.cwd(), mcpServers: [] })).rejects.toBe(
+        initError,
+      );
+    });
+  });
+
   describe("elicitation", () => {
     it("keeps AskUserQuestion disabled and omits callbacks without elicitation capability", async () => {
       await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
@@ -663,6 +700,56 @@ describe("createSession options merging", () => {
 
       expect(capturedOptions!.disallowedTools).toContain("WebSearch");
       expect(capturedOptions!.disallowedTools).not.toContain("AskUserQuestion");
+    });
+
+    // Upstream #1465: MCP's `decline` means the user refused. A request the user never saw is
+    // a `cancel` -- the client answered with an error, or did not advertise the mode.
+    type OnElicitation = NonNullable<Options["onElicitation"]>;
+    const signal = { signal: new AbortController().signal } as Parameters<OnElicitation>[1];
+
+    it("answers an MCP form elicitation with cancel when the client rejects it", async () => {
+      agent = new ClaudeAcpAgent({
+        ...createMockClient(),
+        createElicitation: async () => {
+          throw RequestError.invalidParams(undefined, "Cannot render this form");
+        },
+      } as unknown as AcpClient);
+      await agent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: { elicitation: { form: {} } },
+      });
+      await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
+
+      const answer = await capturedOptions!.onElicitation!(
+        {
+          serverName: "linear",
+          message: "Which team?",
+          mode: "form",
+          requestedSchema: { type: "object", properties: { team: { type: "string" } } },
+        },
+        signal,
+      );
+      expect(answer).toEqual({ action: "cancel" });
+    });
+
+    it("answers an MCP URL elicitation with cancel when the client supports only forms", async () => {
+      await agent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: { elicitation: { form: {} } },
+      });
+      await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
+
+      const answer = await capturedOptions!.onElicitation!(
+        {
+          serverName: "linear",
+          message: "Sign in",
+          mode: "url",
+          url: "https://linear.app/oauth",
+          elicitationId: "e1",
+        },
+        signal,
+      );
+      expect(answer).toEqual({ action: "cancel" });
     });
   });
 
