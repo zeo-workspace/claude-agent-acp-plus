@@ -7454,17 +7454,6 @@ export class ClaudeAcpAgent {
         : [];
     let validValue = allValues.find((o) => o.value === params.value);
 
-    // The option's reported currentValue is always a valid target, even when
-    // it has no options entry: a session running an out-of-picker model
-    // (resumed onto an allowlist-excluded model, or a refusal fallback)
-    // reports a currentValue that isn't selectable, and a client
-    // round-tripping it must not get "Invalid value". It flows through the
-    // normal apply path below — re-asserting an already-current value is
-    // harmless and can repair SDK drift.
-    if (!validValue && option.currentValue === params.value) {
-      validValue = { value: params.value, name: params.value };
-    }
-
     // For model options, fall back to resolveModelPreference when the exact
     // value doesn't match.  This lets callers use human-friendly aliases like
     // "opus" or "sonnet" instead of full model IDs like "claude-opus-4-6".
@@ -10515,6 +10504,21 @@ export function buildConfigOptions(
       }),
     },
   ];
+  // Upstream #1463: ACP requires `currentValue` to be one of `options`
+  // (agent-client-protocol#2557). A session can run a model the picker does not list --
+  // resumed onto a model the `availableModels` allowlist excludes, or switched by a refusal
+  // fallback -- so list it as its own entry. It is not added to `availableModels`, so the
+  // next rebuild after switching to a listed model drops it.
+  const modelOption = options[1] as Extract<SessionConfigOption, { type: "select" }>;
+  const modelRows = modelOption.options as Array<{ value: string; name: string }>;
+  if (!modelRows.some((row) => row.value === models.currentModelId)) {
+    const info = modelInfos.find((model) => model.value === models.currentModelId);
+    modelRows.push({
+      value: models.currentModelId,
+      name: info?.displayName || models.currentModelId,
+      ...(info?.description ? { description: info.description } : {}),
+    });
+  }
 
   // Add effort level option based on the currently selected model
   const currentModelInfo = modelInfos.find((m) => m.value === models.currentModelId);
@@ -11230,16 +11234,31 @@ async function getAvailableModels(
       // not the raw catalog upstream maps here: the filter is visibility-only,
       // so preference resolution and capability lookups elsewhere keep reading
       // the unfiltered catalog (R4.3).
-      availableModels: pickerModels.map((model) => ({
-        modelId: model.value,
-        name: model.displayName,
-        description: model.description,
-      })),
+      availableModels: withDistinctModelNames(
+        pickerModels.map((model) => ({
+          modelId: model.value,
+          name: model.displayName,
+          description: model.description,
+        })),
+      ),
       currentModelId: currentModel.value,
     },
     resumedContextWindow,
     resumedContextUsedTokens,
   };
+}
+
+/** Upstream #1286 (issue #1246): an allowlist can list an alias and pinned ids that inherit the
+ *  same SDK label, so a name-only picker shows identical rows. A name that occurs more than once
+ *  gets its model id appended; every row stays, and distinct names are unchanged. */
+export function withDistinctModelNames<T extends { modelId: string; name: string }>(
+  models: T[],
+): T[] {
+  const counts = new Map<string, number>();
+  for (const model of models) counts.set(model.name, (counts.get(model.name) ?? 0) + 1);
+  return models.map((model) =>
+    counts.get(model.name) === 1 ? model : { ...model, name: `${model.name} (${model.modelId})` },
+  );
 }
 
 function getAvailableSlashCommands(
