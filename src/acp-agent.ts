@@ -3526,6 +3526,10 @@ export class ClaudeAcpAgent {
     let lastAssistantTotalUsage: number | null = null;
     let lastAssistantUsage: UsageSnapshot | null = null;
     let lastAssistantModel: string | null = null;
+    // A `rate_limit_event` that arrived before the turn had a context total to
+    // send it with (upstream #1534): with partial messages on, the SDK sends it
+    // ahead of the first assistant frame. It rides the turn's next usage_update.
+    let pendingRateLimit: unknown = null;
     // When the Claude SDK classifies a turn as failed (e.g. rate limit, auth
     // problem, billing), it sets a categorical `error` field on the
     // `SDKAssistantMessage` that precedes the final `result` message. We capture
@@ -3715,10 +3719,27 @@ export class ClaudeAcpAgent {
         supportsAirSessionFailures(this.clientCapabilities) ? undefined : rawDetail,
       );
 
+    /** Attach a pending rate limit to a usage_update, once. A `_claude/rateLimit`
+     *  the update already carries wins, the same precedence upstream uses. */
+    const withPendingRateLimit = <
+      T extends { sessionUpdate: "usage_update"; _meta?: Record<string, unknown> | null },
+    >(
+      update: T,
+    ): T => {
+      if (pendingRateLimit === null) return update;
+      const rateLimit = pendingRateLimit;
+      pendingRateLimit = null;
+      return { ...update, _meta: { "_claude/rateLimit": rateLimit, ...(update._meta ?? {}) } };
+    };
+
     const resetTurnScratch = () => {
       lastAssistantTotalUsage = null;
       lastAssistantUsage = null;
       lastAssistantModel = null;
+      // A pending event belongs to the turn that measured it; one that found no
+      // usage_update to ride must not be attributed to the next turn. The
+      // tracker already remembers its status (R1.6).
+      pendingRateLimit = null;
       lastAssistantError = undefined;
       lastAssistantWasUsageLimit = false;
       lastAssistantFailureTitle = undefined;
@@ -4768,11 +4789,11 @@ export class ClaudeAcpAgent {
                 session.contextUsedTokens = usedTokens ?? 0;
                 await sendUpdate({
                   sessionId: params.sessionId,
-                  update: {
+                  update: withPendingRateLimit({
                     sessionUpdate: "usage_update",
                     used: lastAssistantTotalUsage,
                     size: session.contextWindowSize,
-                  },
+                  }),
                 });
                 break;
               }
@@ -5741,7 +5762,7 @@ export class ClaudeAcpAgent {
               if (lastAssistantTotalUsage !== null) {
                 await sendUpdate({
                   sessionId: params.sessionId,
-                  update: {
+                  update: withPendingRateLimit({
                     sessionUpdate: "usage_update",
                     used: lastAssistantTotalUsage,
                     size: session.contextWindowSize,
@@ -5752,7 +5773,7 @@ export class ClaudeAcpAgent {
                     ...(message.origin && {
                       _meta: { "_claude/origin": message.origin },
                     }),
-                  },
+                  }),
                 });
               }
 
@@ -6242,11 +6263,11 @@ export class ClaudeAcpAgent {
                 session.contextUsedTokens = nextUsage;
                 await sendUpdate({
                   sessionId: params.sessionId,
-                  update: {
+                  update: withPendingRateLimit({
                     sessionUpdate: "usage_update",
                     used: nextUsage,
                     size: session.contextWindowSize,
-                  },
+                  }),
                 });
               }
             }
@@ -6794,12 +6815,14 @@ export class ClaudeAcpAgent {
             //
             // Recorded OUTSIDE the emission guard below, and before it: the
             // memory is fed by the event itself, not by our ability to forward
-            // it, and before the first assistant message of a session that
-            // guard is false. The forwarding itself is untouched (R1.8) — it
-            // still sends `rate_limit_info` verbatim, still on the same
-            // notification shape, still only when a context total exists.
+            // it, and before the first assistant message of a turn that guard
+            // is false. The forwarding still sends `rate_limit_info` verbatim on
+            // the same notification shape (R1.8); when the turn has no context
+            // total yet, it waits for the turn's next usage_update (#1534).
             this.accountUsageTracker(session).recordMeasured(message.rate_limit_info);
-            if (lastAssistantTotalUsage !== null) {
+            if (lastAssistantTotalUsage === null) {
+              pendingRateLimit = message.rate_limit_info;
+            } else {
               await sendUpdate({
                 sessionId: params.sessionId,
                 update: {
