@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.35.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.34.1...v0.35.0) (2026-11-09)
+
+
+### Features
+
+* upstream ports for parity round 24 ([#1479](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1479), [#1496](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1496), [#1431](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1431), [#1508](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1508), [#1464](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1464) …) ([#206](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/206)) ([dd934a3](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/dd934a3df30de604dac7738e8ed2e00fe0cb0a96))
+
+
+### Bug Fixes
+
+* **deps:** agent SDK 0.3.319 (bundled CLI 2.1.319), @anthropic-ai/sdk 1.6.0 ([#205](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/205)) ([5b07738](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/5b077385890edc950c8fd118e4f3db7858e41bc3))
+* relay a rate_limit_event that arrives before the turn's first assistant frame ([#1534](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1534)) ([#209](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/209)) ([1e4954f](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/1e4954f9385d04193d6b4e982feed3b7322b72eb))
+
 ## [0.34.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.34.0...v0.34.1) (2026-11-09)
 
 
