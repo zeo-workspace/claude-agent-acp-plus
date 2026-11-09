@@ -6506,6 +6506,7 @@ export class ClaudeAcpAgent {
             }
 
             let content: typeof message.message.content;
+            let toolUseResult = message.type === "user" ? message.tool_use_result : undefined;
             if (message.type === "assistant" && message.parent_tool_use_id === null) {
               // Top-level assistant message: each text/thinking block may have
               // already been streamed live as deltas. Diff each against what
@@ -6585,6 +6586,22 @@ export class ClaudeAcpAgent {
               content = message.message.content.filter(
                 (item) => item.type !== "text" && item.type !== "thinking",
               );
+            } else if (
+              message.parent_tool_use_id !== null &&
+              Array.isArray(message.message.content)
+            ) {
+              // Upstream #1431 (#1389): a foreground fork inherits a placeholder result for its
+              // own launch. It completed the Agent call and dropped its tracked state, so the
+              // fork's real report, arriving later, was lost. Only the launching side completes
+              // that call. The message-level sidecar cannot describe a remaining result once its
+              // launch result is removed.
+              const launchId = message.parent_tool_use_id;
+              content = (
+                message.message.content as Array<{ type: string; tool_use_id?: string }>
+              ).filter(
+                (block) => block.type !== "tool_result" || block.tool_use_id !== launchId,
+              ) as typeof message.message.content;
+              if (content.length !== message.message.content.length) toolUseResult = undefined;
             } else {
               content = message.message.content;
             }
@@ -6622,7 +6639,7 @@ export class ClaudeAcpAgent {
                 taskState: session.taskState,
                 emittedToolCalls: session.emittedToolCalls,
                 messageId: messageIdForGrouping(message),
-                toolUseResult: message.type === "user" ? message.tool_use_result : undefined,
+                toolUseResult,
                 // On the wire since CLI 2.1.216 but not in SDKUserMessage's
                 // type, hence the cast. Validated by parseToolResultMeta.
                 toolResultMeta:

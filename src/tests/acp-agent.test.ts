@@ -62,7 +62,13 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "crypto";
 import { readFile } from "node:fs/promises";
-import { inertEscalations, mockSessionState, userEcho, wrapQuery } from "./session-doubles.js";
+import {
+  inertEscalations,
+  mockSessionState,
+  successfulResultMessage,
+  userEcho,
+  wrapQuery,
+} from "./session-doubles.js";
 import { GrantStore } from "../classifier-escalation.js";
 import {
   GOAL_CONTROL_METHOD,
@@ -17145,5 +17151,125 @@ describe("force-cancel while the consumer is sending an update (upstream #1243)"
       new Promise<string>((r) => setTimeout(() => r("never ended"), 2000)),
     ]);
     expect(outcome).toBe("cancelled");
+  });
+});
+
+// Upstream #1431 (#1389), without its AIR rows: plus has no AIR client.
+describe("foreground fork tool results", () => {
+  it.each([
+    ["plain", null],
+    ["plain nested", "toolu_outer"],
+  ] as const)("waits for the launching side's result for a %s client", async (_, parent) => {
+    const updates: SessionNotification[] = [];
+    const logger = { log: vi.fn(), error: vi.fn() };
+    const agent = new ClaudeAcpAgent(
+      {
+        sessionUpdate: async (notification: SessionNotification) => {
+          updates.push(notification);
+        },
+      } as unknown as AcpClient,
+      logger,
+    );
+    await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+    const input = new Pushable<any>();
+    const assistant = (content: unknown[], parentToolUseId: string | null) => ({
+      type: "assistant",
+      parent_tool_use_id: parentToolUseId,
+      uuid: randomUUID(),
+      session_id: "test-session",
+      message: {
+        id: randomUUID(),
+        role: "assistant",
+        model: "claude-sonnet-4-6",
+        content,
+        usage: successfulResultMessage().usage,
+      },
+    });
+    const user = (content: unknown[], parentToolUseId: string | null) => ({
+      type: "user",
+      parent_tool_use_id: parentToolUseId,
+      uuid: randomUUID(),
+      session_id: "test-session",
+      message: { role: "user", content },
+    });
+    const toolResult = (id: string, text: string) => ({
+      type: "tool_result",
+      tool_use_id: id,
+      content: [{ type: "text", text }],
+    });
+    async function* messages() {
+      const { value } = await input[Symbol.asyncIterator]().next();
+      yield userEcho(value);
+      yield assistant(
+        [
+          {
+            type: "tool_use",
+            id: "toolu_fork",
+            name: "Agent",
+            input: {
+              subagent_type: "fork",
+              run_in_background: false,
+              prompt: "Inspect the parser",
+            },
+          },
+        ],
+        parent,
+      );
+      // The fork inherits a result for its own launch. It cannot complete
+      // that call: the launching side sends the actual report later.
+      yield user([toolResult("toolu_fork", "Fork started — that fork is you.")], "toolu_fork");
+      yield assistant(
+        [
+          {
+            type: "tool_use",
+            id: "toolu_child",
+            name: "Agent",
+            input: { subagent_type: "general-purpose", prompt: "Read the parser" },
+          },
+        ],
+        "toolu_fork",
+      );
+      // Keep results of tools the fork itself called, even in a message
+      // that also carries the copied launch result.
+      yield {
+        ...user(
+          [
+            toolResult("toolu_fork", "Fork started — processing in background"),
+            toolResult("toolu_child", "child report"),
+          ],
+          "toolu_fork",
+        ),
+        // Filtering must not attribute the inherited launch sidecar to
+        // the one result that remains in this message.
+        tool_use_result: {
+          status: "completed",
+          content: [{ type: "text", text: "inherited launch report" }],
+        },
+      };
+      yield user([toolResult("toolu_fork", "fork report")], parent);
+      yield successfulResultMessage();
+      yield { type: "system", subtype: "session_state_changed", state: "idle" };
+    }
+    agent.sessions["test-session"] = mockSessionState({ query: wrapQuery(messages()), input });
+
+    await expect(
+      agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "Inspect it" }] }),
+    ).resolves.toMatchObject({ stopReason: "end_turn" });
+
+    const completed = updates.flatMap(({ update }) =>
+      update.sessionUpdate === "tool_call_update" && update.status === "completed"
+        ? [{ id: update.toolCallId, content: update.content, rawOutput: update.rawOutput }]
+        : [],
+    );
+    expect(completed.map(({ id }) => id)).toEqual(["toolu_child", "toolu_fork"]);
+    expect(completed.map(({ content }) => content)).toEqual([
+      [{ type: "content", content: { type: "text", text: "child report" } }],
+      [{ type: "content", content: { type: "text", text: "fork report" } }],
+    ]);
+    expect(completed.map(({ rawOutput }) => rawOutput)).toEqual([
+      [{ type: "text", text: "child report" }],
+      [{ type: "text", text: "fork report" }],
+    ]);
+    expect(logger.error.mock.calls.flat().join("\n")).not.toContain("wasn't tracked");
   });
 });
