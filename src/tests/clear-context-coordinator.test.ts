@@ -22,6 +22,7 @@ function testSession(overrides: Partial<TestSession> = {}): TestSession {
     configOptions: [],
     currentAgent: "default",
     fastModeEnabled: false,
+    contextWindowSize: 200000,
     input: { push: vi.fn() },
     ...overrides,
   };
@@ -258,6 +259,47 @@ describe("continuePlanInFreshContext", () => {
 });
 
 describe("ExitPlanCoordinator", () => {
+  // Upstream #1484: the fresh context's usage is reported as empty right after its mode and
+  // config options, so the client stops showing the old context's usage.
+  it("publishes the fresh context's empty usage after its mode and config options", async () => {
+    const turn: ClearContextTurn = {
+      settled: false,
+      promptUuid: "00000000-0000-4000-8000-000000000000",
+    };
+    const oldSession = testSession({ activeTurn: turn, turnQueue: [turn] });
+    const freshSession = testSession({ contextWindowSize: 1_000_000 });
+    const baseHost = testHost(oldSession, freshSession);
+    const order: string[] = [];
+    vi.mocked(freshSession.input.push).mockImplementation(() => order.push("continuation"));
+    const host = {
+      ...baseHost,
+      sessionUpdate: vi.fn(async (n: { update: { sessionUpdate: string } }) => {
+        order.push(n.update.sessionUpdate);
+      }),
+      destroyReplacement: vi.fn(),
+      settleCancelledTurn: vi.fn(),
+      settleFailedTurn: vi.fn(),
+    };
+    const coordinator = new ExitPlanCoordinator<TestSession, ClearContextTurn>(host);
+
+    await coordinator.restart("public-session", oldSession, {
+      toolUseId: "tool-plan",
+      plan: "Ship it",
+      mode: "auto",
+    });
+
+    expect(order).toEqual([
+      "current_mode_update",
+      "config_option_update",
+      "usage_update",
+      "continuation",
+    ]);
+    expect(host.sessionUpdate).toHaveBeenCalledWith({
+      sessionId: "public-session",
+      update: { sessionUpdate: "usage_update", used: 0, size: 1_000_000 },
+    });
+  });
+
   it("owns cancellation cleanup for a replacement created after close", async () => {
     const turn: ClearContextTurn = {
       settled: false,
