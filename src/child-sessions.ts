@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 
 /**
@@ -35,7 +36,13 @@ type ChildRecord = {
   /** Restored from a transcript without being announced on this connection
    *  (a resume): the next launch announces it in full. */
   unannounced?: boolean;
+  /** The `cwd` the client holds for the child (upstream #1496): absent while it inherits its
+   *  parent's working directory. */
+  reportedCwd?: string;
 };
+
+/** Hooks can report a child's `cwd` before it is announced; bound what waits for one. */
+const MAX_PENDING_CWDS = 64;
 
 export type ChildLaunch = {
   parentSessionId: string;
@@ -87,6 +94,9 @@ export class ChildSessionRouter {
    *  stamp (a progress beat, an edit diff) follows its call, even after its
    *  child settled. Keyed like `byToolUse`; bounded by `place`. */
   private readonly toolCalls = new Map<string, string | null>();
+  /** A child's working directory reported before its announcement, when it differs from its
+   *  parent's. Taken by the announcement. */
+  private readonly pendingCwds = new Map<string, string>();
 
   constructor(
     private readonly send: Send,
@@ -231,11 +241,41 @@ export class ChildSessionRouter {
     await this.sendPrompt(record, launch);
   }
 
+  /**
+   * Upstream #1496: the child's working directory, from the `cwd` of its own hook. A child that
+   * Claude Code runs elsewhere (Agent `isolation: "worktree"`) reports its worktree. The client
+   * gets it only when it differs from the parent's -- in the announcement, or in a
+   * `subagent_update` right after it -- and `null` when the child is back in the parent's.
+   * SubagentStart runs before the child's first model request, so the `cwd` reaches the client
+   * before the child's first tool call.
+   */
+  async reportCwd(childId: string, cwd: string, parentCwd: string): Promise<void> {
+    if (!path.isAbsolute(cwd)) return;
+    const value = path.resolve(cwd) === path.resolve(parentCwd) ? undefined : cwd;
+    const record = this.byChild.get(childId);
+    if (!record || record.unannounced) {
+      if (value === undefined) this.pendingCwds.delete(childId);
+      else if (this.pendingCwds.has(childId) || this.pendingCwds.size < MAX_PENDING_CWDS) {
+        this.pendingCwds.set(childId, value);
+      }
+      return;
+    }
+    if (record.reportedCwd === value) return;
+    record.reportedCwd = value;
+    await this.send({
+      sessionId: record.announcedOn,
+      update: { sessionUpdate: "subagent_update", sessionId: record.childId, cwd: value ?? null },
+    });
+  }
+
   private async announce(
     record: ChildRecord,
     launch: ChildLaunch,
     state?: { state: "running" },
   ): Promise<void> {
+    const cwd = this.pendingCwds.get(record.childId);
+    this.pendingCwds.delete(record.childId);
+    if (cwd !== undefined) record.reportedCwd = cwd;
     await this.send({
       sessionId: record.announcedOn,
       update: {
@@ -243,6 +283,7 @@ export class ChildSessionRouter {
         sessionId: record.childId,
         title: launch.title,
         ...(launch.description ? { description: launch.description } : {}),
+        ...(record.reportedCwd ? { cwd: record.reportedCwd } : {}),
         // `SubagentSessionCapabilities.cancel` is an object when supported;
         // absent, Zed disables Stop for the child (design.md, Security).
         ...(launch.cancellable ? { capabilities: { cancel: {} } } : {}),

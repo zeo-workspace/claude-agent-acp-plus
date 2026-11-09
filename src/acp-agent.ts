@@ -9735,6 +9735,36 @@ export class ClaudeAcpAgent {
               ],
             }
           : {}),
+        // Upstream #1496: a subagent's working directory, from its own SubagentStart hook,
+        // which Claude Code runs (and waits for) before the child's first model request.
+        ...(this.childSessions
+          ? {
+              SubagentStart: [
+                ...(userProvidedOptions?.hooks?.SubagentStart || []),
+                {
+                  hooks: [
+                    async (input: { agent_id?: unknown; cwd?: unknown }) => {
+                      const childSessions = this.childSessions;
+                      if (
+                        childSessions &&
+                        typeof input.agent_id === "string" &&
+                        typeof input.cwd === "string"
+                      ) {
+                        await childSessions
+                          .reportCwd(input.agent_id, input.cwd, params.cwd)
+                          .catch((error) =>
+                            this.logger.error(
+                              `Session ${sessionId}: failed to report subagent cwd: ${error}`,
+                            ),
+                          );
+                      }
+                      return { continue: true };
+                    },
+                  ],
+                },
+              ],
+            }
+          : {}),
         TaskCreated: [
           ...(userProvidedOptions?.hooks?.TaskCreated || []),
           {
