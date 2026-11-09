@@ -50,6 +50,13 @@ import { fileURLToPath } from "node:url";
  *     cooldown by operator decision. 0.3.317 adds the `session_writes_lost`
  *     system message. The background-subagent probe was NOT re-run for it.
  *
+ *   - **0.3.318 -> 0.3.319, 2026-11-09, by hand (Zeo next, Wave 1).** With
+ *     @anthropic-ai/sdk 1.6.0, inside the cooldown by operator decision
+ *     (2026-11-08). Bundles CLI 2.1.319: security fixes (a Bash permission bypass
+ *     through an environment prefix, `sed` skipping the permission check, a
+ *     worktree sandbox escape), and background Bash commands that finish at once
+ *     no longer lose their output.
+ *
  * Neither measurement is a regression test, and that is the point of the
  * paragraph below: re-measure on the next crossing rather than trusting green.
  *
@@ -84,7 +91,7 @@ const MIRROR_ROOT = join(HERE, "..", "..");
 const FORK_ROOT = join(MIRROR_ROOT, "..", "fork");
 
 const SDK = "@anthropic-ai/claude-agent-sdk";
-const PINNED = "0.3.318";
+const PINNED = "0.3.319";
 
 function readJson(path: string): Record<string, any> {
   return JSON.parse(readFileSync(path, "utf8"));
