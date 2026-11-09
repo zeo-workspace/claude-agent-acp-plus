@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.35.0...v0.36.0) (2026-11-09)
+
+
+### Features
+
+* **plan:** keyed plan and start-over (§5.1); fix(tasks): cancelled turn ends foreground tasks (§5.3) ([#210](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/210)) ([61e38e7](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/61e38e795ffc8ef3bba82ca32cfdce6f919aac01))
+
 ## [0.35.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.34.1...v0.35.0) (2026-11-09)
 
 
