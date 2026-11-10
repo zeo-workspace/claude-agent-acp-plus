@@ -3661,6 +3661,8 @@ export class ClaudeAcpAgent {
           session.titles.onAssistantText(update.content);
         }
       }
+      // Live, a message's time is when plus sends it (§6.4); replay stamps the transcript's.
+      stampMessageTime(update, new Date().toISOString());
       await this.client.sessionUpdate(notification);
     };
 
@@ -7700,6 +7702,7 @@ export class ClaudeAcpAgent {
           cwd: this.sessions[parentId]?.cwd,
           taskState: this.sessions[parentId]?.taskState,
           messageId: messageIdForGrouping(message),
+          timestamp: transcriptTime(message),
         },
       )) {
         await this.client.sessionUpdate({ ...notification, sessionId: record.agentId });
@@ -7913,6 +7916,7 @@ export class ClaudeAcpAgent {
           cwd: this.sessions[sessionId]?.cwd,
           taskState: this.sessions[sessionId]?.taskState,
           messageId: replayMessageId,
+          timestamp: transcriptTime(message),
           parentToolUseId,
         },
       )) {
@@ -11621,6 +11625,34 @@ function applyMessageId(
   }
 }
 
+/** The time a transcript message was recorded. SDK getSessionMessages returns `timestamp` at
+ *  runtime although its SessionMessage type does not declare it; anything but a string is
+ *  treated as absent. */
+function transcriptTime(message: unknown): string | undefined {
+  const timestamp = (message as { timestamp?: unknown } | null | undefined)?.timestamp;
+  return typeof timestamp === "string" && timestamp.length > 0 ? timestamp : undefined;
+}
+
+/**
+ * Stamps `_meta.claudeCode.timestamp` (ISO 8601) on a user or agent message chunk, so a client
+ * can show when the message was sent and how long its turn took (Zeo next proposal §6.4). A
+ * chunk that already carries a time keeps it: replay stamps the transcript's own time first, and
+ * the live funnel must not overwrite it. Other updates are left alone.
+ */
+export function stampMessageTime(update: SessionNotification["update"], timestamp: string): void {
+  if (
+    update.sessionUpdate !== "agent_message_chunk" &&
+    update.sessionUpdate !== "user_message_chunk"
+  ) {
+    return;
+  }
+  const claudeCode = (update._meta?.claudeCode ?? {}) as Record<string, unknown>;
+  if (typeof claudeCode.timestamp === "string") {
+    return;
+  }
+  update._meta = { ...update._meta, claudeCode: { ...claudeCode, timestamp } };
+}
+
 /** Built-in tools that drive the task list (headless/SDK sessions use these
  *  instead of TodoWrite). Their tool_use/tool_result are surfaced as `plan`
  *  snapshots rather than as tool_calls. */
@@ -11816,6 +11848,9 @@ export function toAcpNotifications(
     // into a single message. Omit it (leave undefined) when unknown — never send
     // an explicit `null`.
     messageId?: string;
+    // When the message was sent, ISO 8601: the transcript's `timestamp` on replay. Stamped on
+    // its user/agent message chunks (stampMessageTime); live chunks are stamped by the funnel.
+    timestamp?: string;
     // The SDK user message's `tool_use_result`: the structured Output object of
     // the tool_result this message carries (shape is per-tool). Used to render
     // Agent/Task results from the structured subagent report instead of the raw
@@ -11855,6 +11890,9 @@ export function toAcpNotifications(
       };
     }
 
+    if (options?.timestamp) {
+      stampMessageTime(update, options.timestamp);
+    }
     return [{ sessionId, update }];
   }
 
@@ -12273,6 +12311,11 @@ export function toAcpNotifications(
     }
   }
 
+  if (options?.timestamp) {
+    for (const notification of output) {
+      stampMessageTime(notification.update, options.timestamp);
+    }
+  }
   return output;
 }
 
