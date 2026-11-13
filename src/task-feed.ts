@@ -43,6 +43,7 @@ import type {
   SDKTaskUpdatedMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { readTail } from "./task-output.js";
+import { type TaskPurpose, taskPurpose } from "./task-purpose.js";
 
 /** The `session_info_update._meta` key the snapshot is published under. */
 export const TASKS_META_KEY = "_claude/tasks";
@@ -79,6 +80,10 @@ export type TaskEntry = {
   /** The subagent's child session under the subagents RFD (version 3, story
    *  065). Never set by the feed: added at send time, so v2 bytes cannot change. */
   childSessionId?: string;
+  /** What a shell task is for — ci, test, build or watch — read from its command
+   *  (task-purpose.ts), which itself never reaches the wire. Present only when a
+   *  rule matched, so an untagged task's bytes are what they were (Zeo next §6.2). */
+  purpose?: TaskPurpose;
 };
 
 export type TasksSnapshot = { tasks: TaskEntry[] };
@@ -218,6 +223,13 @@ export class TaskFeed {
       hasOutput: false,
       tail: null,
     };
+    if (shell) {
+      // The SDK's `prompt` is the command line; without it, the SDK's description is
+      // the command for a shell unless the tool's own description replaced it.
+      const command = msg.prompt ?? (fromTool ? undefined : msg.description);
+      const purpose = command === undefined ? null : taskPurpose(command);
+      if (purpose !== null) entry.purpose = purpose;
+    }
     if (shell && msg.is_backgrounded !== true) {
       this.held.set(msg.task_id, entry);
       return "held";
