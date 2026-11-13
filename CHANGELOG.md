@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.37.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.36.0...v0.37.0) (2026-11-13)
+
+
+### Features
+
+* message times, task purpose tags, tasks/output byte offset (§6.4, §6.2, §6.1); fix: resumed pinned-model occupancy (§6.15) ([#219](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/219)) ([a3378b8](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/a3378b884e6043e874999058f0474eb0e70a7809))
+
+
+### Miscellaneous Chores
+
+* **deps:** bump the minor group across 1 directory with 14 updates ([#217](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/217)) ([f16e689](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/f16e6899bb8693103e47d4990bc632bfb7706122))
+
 ## [0.36.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.35.0...v0.36.0) (2026-11-09)
 
 
