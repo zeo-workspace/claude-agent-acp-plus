@@ -11317,6 +11317,9 @@ async function getAvailableModels(
   // ends, exactly as every resumed session did before this seeding existed.
   let resumedContextWindow: number | null = null;
   let resumedContextUsedTokens: number | null = null;
+  // Whether `readResumedLiveModel` ran: it is the only source of the resumed
+  // window and occupancy, so a resume that skipped it still owes one read.
+  let resumedLiveRead = false;
 
   // Model priority (highest to lowest):
   // 1. ANTHROPIC_MODEL environment variable
@@ -11349,6 +11352,7 @@ async function getAvailableModels(
     currentModel = live.model ?? currentModel;
     resumedContextWindow = live.contextWindow;
     resumedContextUsedTokens = live.contextUsedTokens;
+    resumedLiveRead = true;
   }
 
   // Skip the setModel round-trip when we can prove the SDK has already landed
@@ -11385,7 +11389,21 @@ async function getAvailableModels(
       currentModel = live.model ?? currentModel;
       resumedContextWindow = live.contextWindow;
       resumedContextUsedTokens = live.contextUsedTokens;
+      resumedLiveRead = true;
     }
+  }
+
+  // A resume with a model pinned (ANTHROPIC_MODEL or settings.model) took the
+  // re-assert branch and never read the live report, which is also where the
+  // window and the occupancy come from: the ring of a reopened thread drew
+  // `used: 0` until the next turn (Zeo next §6.15). Read them now, after the
+  // re-assert, so the window is the pinned model's. Only the window and the
+  // occupancy are taken — the model is the pin, already applied. Still one
+  // control request on the load path, as the unpinned resume makes.
+  if (isResumedSession && !resumedLiveRead) {
+    const live = await readResumedLiveModel(query, models, logger, resumedSessionId);
+    resumedContextWindow = live.contextWindow;
+    resumedContextUsedTokens = live.contextUsedTokens;
   }
 
   return {

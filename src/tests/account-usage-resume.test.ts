@@ -380,4 +380,33 @@ describe("a resumed session's context ring starts where the session left off (B3
     // Which is why those two are still absent when it fails.
     expect(agent.sessions[SESSION_ID]?.contextUsedTokens).toBeUndefined();
   });
+  /**
+   * Zeo next §6.15 (ask 35): with a model pinned in settings.json — which is
+   * how this machine runs, `"model": "opus"` — a reopened thread's ring came
+   * back empty. The pin sends `getAvailableModels` down the branch that
+   * re-asserts it with `setModel` instead of reading the live model, and that
+   * read was also the only place the occupancy came from. So the quota
+   * `usage_update` said `used: 0` and the ring drew an empty circle until the
+   * next turn measured it.
+   */
+  it("reports the occupancy when a pinned model sends session/load past the live read", async () => {
+    await fs.promises.writeFile(
+      path.join(tempDir, "settings.json"),
+      JSON.stringify({ model: MODEL.value }),
+    );
+    const getContextUsage = vi.fn(async () => contextUsage(RESUMED_USED));
+    const setModel = vi.fn(async () => {});
+    installQuery({ getContextUsage, setModel });
+    const agent = await makeAgent();
+
+    await agent.loadSession({ sessionId: SESSION_ID, cwd: projectDir, mcpServers: [] });
+
+    expect(setModel).toHaveBeenCalledWith(MODEL.value);
+    expect(agent.sessions[SESSION_ID]?.contextUsedTokens).toBe(RESUMED_USED);
+    await vi.waitFor(() => expect(quotaUpdates(notifications).length).toBeGreaterThan(0));
+    expect(quotaUpdates(notifications)).toEqual([{ used: RESUMED_USED, size: RESUMED_WINDOW }]);
+    // Still one request: the read moves after the re-assert, so it measures the
+    // pinned model's window, and the background refresh finds it authoritative.
+    expect(getContextUsage).toHaveBeenCalledTimes(1);
+  });
 });
