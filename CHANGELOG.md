@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.37.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.37.0...v0.37.1) (2026-11-13)
+
+
+### Miscellaneous Chores
+
+* **deps:** bump encodeurl from 2.0.0 to 2.0.1 ([#204](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/204)) ([cdc1923](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/cdc1923078b4e38f51e866abacf034e473593389))
+* **deps:** bump github/codeql-action/upload-sarif ([#212](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/212)) ([e6eb4c7](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/e6eb4c783007c40d671aa66a63d336a9a131ec1e))
+
 ## [0.37.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.36.0...v0.37.0) (2026-11-13)
 
 
