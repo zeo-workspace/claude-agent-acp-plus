@@ -197,6 +197,35 @@ describe("TaskFeed — a started task (R1.1)", () => {
 
     expect(JSON.stringify(publish(feed))).not.toContain("rm -rf");
   });
+
+  /** Zeo next §6.2: the tag rides the wire; the command it was read from does not. */
+  it("tags a shell by its command without publishing the command", () => {
+    const { feed } = makeFeed();
+    feed.onStarted(
+      started("t1", { description: "Run the tests", prompt: "cargo test -p agent_ui" }),
+    );
+    feed.onStarted(started("t2", { description: "List files", prompt: "ls -la" }));
+    feed.onStarted(started("t3", { description: "cargo build --release" }));
+
+    const tasks = publish(feed).tasks;
+    const byId = (id: string) => tasks.find((task: any) => task.id === id) as any;
+    expect(byId("t1").purpose).toBe("test");
+    expect("purpose" in byId("t2")).toBe(false);
+    expect(byId("t3").purpose).toBe("build");
+    expect(JSON.stringify(tasks)).not.toContain("cargo test -p agent_ui");
+  });
+
+  it("tags no subagent: only shells carry a command", () => {
+    const { feed } = makeFeed();
+    feed.onStarted(
+      started("a1", {
+        task_type: "local_agent",
+        description: "cargo test everything",
+        prompt: "cargo test",
+      }),
+    );
+    expect("purpose" in (publish(feed).tasks[0] as any)).toBe(false);
+  });
 });
 
 describe("TaskFeed — progress (R1.2)", () => {

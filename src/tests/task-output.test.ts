@@ -63,6 +63,7 @@ describe("readOutput — the end of the file (R2.1)", () => {
       content: text,
       totalBytes: bytes(text),
       truncated: false,
+      startByte: 0,
     });
   });
 
@@ -95,6 +96,7 @@ describe("readOutput — the end of the file (R2.1)", () => {
       content: exact,
       totalBytes: 100,
       truncated: false,
+      startByte: 0,
     });
 
     const over = "x\n" + exact; // 102 bytes: the first line must go

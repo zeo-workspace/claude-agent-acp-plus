@@ -460,8 +460,22 @@ export const TASKS_CAPABILITY_VERSION = TASKS_CONTRACT_VERSION;
 export const TASKS_RFD_CONTRACT_VERSION = 3;
 
 export type TasksStopRequest = { sessionId: string; taskId: string };
-export type TasksOutputRequest = { sessionId: string; taskId: string; maxBytes: number };
-export type TasksOutputResponse = { content: string; totalBytes: number; truncated: boolean };
+/** `fromByte` (Zeo next §6.1, §6.27): read on from this offset instead of the end. Optional, so
+ *  a client that never sends it is served as before. */
+export type TasksOutputRequest = {
+  sessionId: string;
+  taskId: string;
+  maxBytes: number;
+  fromByte?: number;
+};
+/** `startByte`: the file offset `content` begins at. A client that gets none back is talking to
+ *  an adapter older than `fromByte`, and has the end of the file. */
+export type TasksOutputResponse = {
+  content: string;
+  totalBytes: number;
+  truncated: boolean;
+  startByte: number;
+};
 export type TasksBackgroundRequest = { sessionId: string; toolCallId: string };
 export type TasksBackgroundResponse = { backgrounded: boolean };
 
@@ -544,7 +558,15 @@ export function parseTasksOutputRequest(params: unknown): TasksOutputRequest {
       `${TASKS_OUTPUT_METHOD} params require maxBytes, a positive integer`,
     );
   }
-  return { sessionId, taskId, maxBytes };
+  const fromByte = (params as Record<string, unknown>).fromByte;
+  if (fromByte === undefined) return { sessionId, taskId, maxBytes };
+  if (typeof fromByte !== "number" || !Number.isSafeInteger(fromByte) || fromByte < 0) {
+    throw RequestError.invalidParams(
+      undefined,
+      `${TASKS_OUTPUT_METHOD} fromByte, when present, must be a non-negative integer`,
+    );
+  }
+  return { sessionId, taskId, maxBytes, fromByte };
 }
 
 /** Validate raw JSON-RPC params into a {@link TasksBackgroundRequest}. */
@@ -3314,7 +3336,7 @@ export class ClaudeAcpAgent {
    * never the content.
    */
   async taskOutput(params: TasksOutputRequest): Promise<TasksOutputResponse> {
-    const { sessionId, taskId, maxBytes } = params;
+    const { sessionId, taskId, maxBytes, fromByte } = params;
     const log = (outcome: string, detail: string) =>
       this.logger.log(
         `[tasks/output] method=${TASKS_OUTPUT_METHOD} sessionId=${logValue(sessionId)} taskId=${logValue(taskId)} ${detail} outcome=${outcome}`,
@@ -3338,8 +3360,11 @@ export class ClaudeAcpAgent {
       );
     }
     try {
-      const result = await readOutput(path, maxBytes);
-      log("ok", `bytes=${Buffer.byteLength(result.content, "utf8")} truncated=${result.truncated}`);
+      const result = await readOutput(path, maxBytes, fromByte);
+      log(
+        "ok",
+        `fromByte=${fromByte ?? "end"} startByte=${result.startByte} bytes=${Buffer.byteLength(result.content, "utf8")} truncated=${result.truncated}`,
+      );
       return result;
     } catch (error) {
       if (error instanceof OutputUnavailable) {
@@ -3661,6 +3686,8 @@ export class ClaudeAcpAgent {
           session.titles.onAssistantText(update.content);
         }
       }
+      // Live, a message's time is when plus sends it (§6.4); replay stamps the transcript's.
+      stampMessageTime(update, new Date().toISOString());
       await this.client.sessionUpdate(notification);
     };
 
@@ -7700,6 +7727,7 @@ export class ClaudeAcpAgent {
           cwd: this.sessions[parentId]?.cwd,
           taskState: this.sessions[parentId]?.taskState,
           messageId: messageIdForGrouping(message),
+          timestamp: transcriptTime(message),
         },
       )) {
         await this.client.sessionUpdate({ ...notification, sessionId: record.agentId });
@@ -7913,6 +7941,7 @@ export class ClaudeAcpAgent {
           cwd: this.sessions[sessionId]?.cwd,
           taskState: this.sessions[sessionId]?.taskState,
           messageId: replayMessageId,
+          timestamp: transcriptTime(message),
           parentToolUseId,
         },
       )) {
@@ -11313,6 +11342,9 @@ async function getAvailableModels(
   // ends, exactly as every resumed session did before this seeding existed.
   let resumedContextWindow: number | null = null;
   let resumedContextUsedTokens: number | null = null;
+  // Whether `readResumedLiveModel` ran: it is the only source of the resumed
+  // window and occupancy, so a resume that skipped it still owes one read.
+  let resumedLiveRead = false;
 
   // Model priority (highest to lowest):
   // 1. ANTHROPIC_MODEL environment variable
@@ -11345,6 +11377,7 @@ async function getAvailableModels(
     currentModel = live.model ?? currentModel;
     resumedContextWindow = live.contextWindow;
     resumedContextUsedTokens = live.contextUsedTokens;
+    resumedLiveRead = true;
   }
 
   // Skip the setModel round-trip when we can prove the SDK has already landed
@@ -11381,7 +11414,21 @@ async function getAvailableModels(
       currentModel = live.model ?? currentModel;
       resumedContextWindow = live.contextWindow;
       resumedContextUsedTokens = live.contextUsedTokens;
+      resumedLiveRead = true;
     }
+  }
+
+  // A resume with a model pinned (ANTHROPIC_MODEL or settings.model) took the
+  // re-assert branch and never read the live report, which is also where the
+  // window and the occupancy come from: the ring of a reopened thread drew
+  // `used: 0` until the next turn (Zeo next §6.15). Read them now, after the
+  // re-assert, so the window is the pinned model's. Only the window and the
+  // occupancy are taken — the model is the pin, already applied. Still one
+  // control request on the load path, as the unpinned resume makes.
+  if (isResumedSession && !resumedLiveRead) {
+    const live = await readResumedLiveModel(query, models, logger, resumedSessionId);
+    resumedContextWindow = live.contextWindow;
+    resumedContextUsedTokens = live.contextUsedTokens;
   }
 
   return {
@@ -11621,6 +11668,34 @@ function applyMessageId(
   }
 }
 
+/** The time a transcript message was recorded. SDK getSessionMessages returns `timestamp` at
+ *  runtime although its SessionMessage type does not declare it; anything but a string is
+ *  treated as absent. */
+function transcriptTime(message: unknown): string | undefined {
+  const timestamp = (message as { timestamp?: unknown } | null | undefined)?.timestamp;
+  return typeof timestamp === "string" && timestamp.length > 0 ? timestamp : undefined;
+}
+
+/**
+ * Stamps `_meta.claudeCode.timestamp` (ISO 8601) on a user or agent message chunk, so a client
+ * can show when the message was sent and how long its turn took (Zeo next proposal §6.4). A
+ * chunk that already carries a time keeps it: replay stamps the transcript's own time first, and
+ * the live funnel must not overwrite it. Other updates are left alone.
+ */
+export function stampMessageTime(update: SessionNotification["update"], timestamp: string): void {
+  if (
+    update.sessionUpdate !== "agent_message_chunk" &&
+    update.sessionUpdate !== "user_message_chunk"
+  ) {
+    return;
+  }
+  const claudeCode = (update._meta?.claudeCode ?? {}) as Record<string, unknown>;
+  if (typeof claudeCode.timestamp === "string") {
+    return;
+  }
+  update._meta = { ...update._meta, claudeCode: { ...claudeCode, timestamp } };
+}
+
 /** Built-in tools that drive the task list (headless/SDK sessions use these
  *  instead of TodoWrite). Their tool_use/tool_result are surfaced as `plan`
  *  snapshots rather than as tool_calls. */
@@ -11816,6 +11891,9 @@ export function toAcpNotifications(
     // into a single message. Omit it (leave undefined) when unknown — never send
     // an explicit `null`.
     messageId?: string;
+    // When the message was sent, ISO 8601: the transcript's `timestamp` on replay. Stamped on
+    // its user/agent message chunks (stampMessageTime); live chunks are stamped by the funnel.
+    timestamp?: string;
     // The SDK user message's `tool_use_result`: the structured Output object of
     // the tool_result this message carries (shape is per-tool). Used to render
     // Agent/Task results from the structured subagent report instead of the raw
@@ -11855,6 +11933,9 @@ export function toAcpNotifications(
       };
     }
 
+    if (options?.timestamp) {
+      stampMessageTime(update, options.timestamp);
+    }
     return [{ sessionId, update }];
   }
 
@@ -12273,6 +12354,11 @@ export function toAcpNotifications(
     }
   }
 
+  if (options?.timestamp) {
+    for (const notification of output) {
+      stampMessageTime(notification.update, options.timestamp);
+    }
+  }
   return output;
 }
 
