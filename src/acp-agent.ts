@@ -460,8 +460,22 @@ export const TASKS_CAPABILITY_VERSION = TASKS_CONTRACT_VERSION;
 export const TASKS_RFD_CONTRACT_VERSION = 3;
 
 export type TasksStopRequest = { sessionId: string; taskId: string };
-export type TasksOutputRequest = { sessionId: string; taskId: string; maxBytes: number };
-export type TasksOutputResponse = { content: string; totalBytes: number; truncated: boolean };
+/** `fromByte` (Zeo next §6.1, §6.27): read on from this offset instead of the end. Optional, so
+ *  a client that never sends it is served as before. */
+export type TasksOutputRequest = {
+  sessionId: string;
+  taskId: string;
+  maxBytes: number;
+  fromByte?: number;
+};
+/** `startByte`: the file offset `content` begins at. A client that gets none back is talking to
+ *  an adapter older than `fromByte`, and has the end of the file. */
+export type TasksOutputResponse = {
+  content: string;
+  totalBytes: number;
+  truncated: boolean;
+  startByte: number;
+};
 export type TasksBackgroundRequest = { sessionId: string; toolCallId: string };
 export type TasksBackgroundResponse = { backgrounded: boolean };
 
@@ -544,7 +558,15 @@ export function parseTasksOutputRequest(params: unknown): TasksOutputRequest {
       `${TASKS_OUTPUT_METHOD} params require maxBytes, a positive integer`,
     );
   }
-  return { sessionId, taskId, maxBytes };
+  const fromByte = (params as Record<string, unknown>).fromByte;
+  if (fromByte === undefined) return { sessionId, taskId, maxBytes };
+  if (typeof fromByte !== "number" || !Number.isSafeInteger(fromByte) || fromByte < 0) {
+    throw RequestError.invalidParams(
+      undefined,
+      `${TASKS_OUTPUT_METHOD} fromByte, when present, must be a non-negative integer`,
+    );
+  }
+  return { sessionId, taskId, maxBytes, fromByte };
 }
 
 /** Validate raw JSON-RPC params into a {@link TasksBackgroundRequest}. */
@@ -3314,7 +3336,7 @@ export class ClaudeAcpAgent {
    * never the content.
    */
   async taskOutput(params: TasksOutputRequest): Promise<TasksOutputResponse> {
-    const { sessionId, taskId, maxBytes } = params;
+    const { sessionId, taskId, maxBytes, fromByte } = params;
     const log = (outcome: string, detail: string) =>
       this.logger.log(
         `[tasks/output] method=${TASKS_OUTPUT_METHOD} sessionId=${logValue(sessionId)} taskId=${logValue(taskId)} ${detail} outcome=${outcome}`,
@@ -3338,8 +3360,11 @@ export class ClaudeAcpAgent {
       );
     }
     try {
-      const result = await readOutput(path, maxBytes);
-      log("ok", `bytes=${Buffer.byteLength(result.content, "utf8")} truncated=${result.truncated}`);
+      const result = await readOutput(path, maxBytes, fromByte);
+      log(
+        "ok",
+        `fromByte=${fromByte ?? "end"} startByte=${result.startByte} bytes=${Buffer.byteLength(result.content, "utf8")} truncated=${result.truncated}`,
+      );
       return result;
     } catch (error) {
       if (error instanceof OutputUnavailable) {

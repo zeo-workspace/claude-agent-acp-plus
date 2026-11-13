@@ -196,6 +196,7 @@ describe("_claude/tasks/output — outcomes (R2.1, R2.3, R2.5, R2.6)", () => {
       content,
       totalBytes: Buffer.byteLength(content),
       truncated: false,
+      startByte: 0,
     });
   });
 
@@ -210,6 +211,7 @@ describe("_claude/tasks/output — outcomes (R2.1, R2.3, R2.5, R2.6)", () => {
       content: "second\nthird\n",
       totalBytes: Buffer.byteLength(content),
       truncated: true,
+      startByte: Buffer.byteLength("first line that goes\n"),
     });
   });
 
@@ -437,7 +439,12 @@ describe("_claude/tasks/output over JSON-RPC (R2.1, R2.2, R2.9)", () => {
     await waitFor(() => true, "settle");
 
     const out = await w.request(OUTPUT, { sessionId, taskId: "b1", maxBytes: MIB });
-    expect(out).toEqual({ content, totalBytes: Buffer.byteLength(content), truncated: false });
+    expect(out).toEqual({
+      content,
+      totalBytes: Buffer.byteLength(content),
+      truncated: false,
+      startByte: 0,
+    });
   });
 
   it("answers invalid params for a malformed maxBytes before reaching the agent", async () => {
