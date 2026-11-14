@@ -56,13 +56,29 @@ describe("createFastModeConfigOption", () => {
     expect(createFastModeConfigOption(false, true, "sdk_opt_in_required").description).toBe(
       "Faster responses on supported models",
     );
-    expect(createFastModeConfigOption(false, true, "preference").description).toBe(
+    expect(createFastModeConfigOption(false, true, "pending").description).toBe(
       "Faster responses on supported models",
     );
     // A reason riding an `on` state isn't blocking anything right now.
     expect(createFastModeConfigOption(true, true, "free").description).toBe(
       "Faster responses on supported models",
     );
+  });
+
+  // Upstream #1602: behind a gateway that authenticates with
+  // ANTHROPIC_AUTH_TOKEN only, Claude Code reports `preference` on every turn
+  // without asking the server, and the toggle snapped off with no reason.
+  it("explains preference, unknown, and a code a newer SDK adds", () => {
+    expect(createFastModeConfigOption(false, true, "preference").description).toBe(
+      "Faster responses on supported models — not enabled for your organization or API gateway",
+    );
+    expect(createFastModeConfigOption(false, true, "unknown").description).toBe(
+      "Faster responses on supported models — currently unavailable",
+    );
+    expect(
+      createFastModeConfigOption(false, true, "some_future_reason" as FastModeDisabledReason)
+        .description,
+    ).toBe("Faster responses on supported models — not available (some_future_reason)");
   });
 
   it("falls back to an on/off select when the client did not opt in", () => {
@@ -158,17 +174,18 @@ describe("normalizeFastModeDisabledReason", () => {
     expect(normalizeFastModeDisabledReason("not_first_party")).toBe("not_first_party");
     expect(normalizeFastModeDisabledReason("disabled_by_env")).toBe("disabled_by_env");
     expect(normalizeFastModeDisabledReason("network_error")).toBe("network_error");
+    expect(normalizeFastModeDisabledReason("preference")).toBe("preference");
+    expect(normalizeFastModeDisabledReason("unknown")).toBe("unknown");
+    // A code a newer SDK adds gets the generic text, so it is retained too.
+    expect(normalizeFastModeDisabledReason("some_future_reason" as FastModeDisabledReason)).toBe(
+      "some_future_reason",
+    );
   });
 
-  it("drops routine states and unknown values", () => {
+  it("drops only the routine states", () => {
     expect(normalizeFastModeDisabledReason("sdk_opt_in_required")).toBeUndefined();
-    expect(normalizeFastModeDisabledReason("preference")).toBeUndefined();
     expect(normalizeFastModeDisabledReason("pending")).toBeUndefined();
-    expect(normalizeFastModeDisabledReason("unknown")).toBeUndefined();
     expect(normalizeFastModeDisabledReason(undefined)).toBeUndefined();
-    expect(
-      normalizeFastModeDisabledReason("some_future_reason" as FastModeDisabledReason),
-    ).toBeUndefined();
   });
 });
 
@@ -419,6 +436,20 @@ describe("syncFastModeState (SDK-driven state changes)", () => {
     // The same report again changes nothing the user can see: no repeat notice.
     await sync(SESSION_ID, session, "off", "extra_usage_disabled");
     expect(sessionUpdates).toHaveLength(2);
+  });
+
+  it("explains the flip when Claude Code reports preference (upstream #1602)", async () => {
+    const { sync, session, sessionUpdates } = setup({ fastModeEnabled: true, withOption: true });
+
+    await sync(SESSION_ID, session, "off", "preference");
+
+    expect(sessionUpdates[0].update).toEqual({
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "text",
+        text: "\n\n> **Fast mode turned off:** not enabled for your organization or API gateway.\n\n",
+      },
+    });
   });
 
   it("explains the flip as a live notice to a client on the notice contract", async () => {

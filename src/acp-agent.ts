@@ -994,7 +994,7 @@ export type Session = {
    *  another account's history (D7). */
   accountEnv?: Record<string, string>;
   /** Why the SDK currently can't serve Fast mode, when the reason is one worth
-   *  telling the user about (see {@link FAST_MODE_UNAVAILABLE_EXPLANATIONS} —
+   *  telling the user about (see {@link explainFastModeDisabledReason} —
    *  routine states like the SDK's own opt-in requirement normalize to
    *  `undefined`). Refreshed from every `fast_mode_disabled_reason` the SDK
    *  reports on `system`/init and user-turn `result`s; surfaced in the Fast mode
@@ -9315,8 +9315,7 @@ export class ClaudeAcpAgent {
     // The user asked for Fast mode and the SDK is telling us it can't serve it.
     // The description carries the same explanation, but a toggle silently
     // snapping back is the case worth saying out loud once, at the flip.
-    const explanation =
-      nextReason !== undefined ? FAST_MODE_UNAVAILABLE_EXPLANATIONS[nextReason] : undefined;
+    const explanation = explainFastModeDisabledReason(nextReason);
     const explain = session.fastModeEnabled && !enabled && explanation !== undefined;
     session.fastModeEnabled = enabled;
     session.fastModeDisabledReason = nextReason;
@@ -10559,16 +10558,15 @@ export function fastModeStateEnabled(state: FastModeState): boolean {
   return state !== "off";
 }
 
-/** User-facing explanations for the SDK's `fast_mode_disabled_reason` values
- *  that a user can act on (or at least wants to know about). Deliberately
- *  partial — the omitted reasons are not worth surfacing:
- *   - `sdk_opt_in_required`: every SDK session starts here (the toggle IS the
- *     opt-in), so it describes the default, not a problem.
- *   - `preference`: the user turned Fast mode off themselves.
- *   - `pending`: eligibility is still resolving; the next report supersedes it.
- *   - `unknown`: nothing meaningful to say.
- *  Unknown future reasons fall through the same way (open set — the SDK's docs
- *  say to ignore values you don't handle). */
+/** User-facing explanations for the SDK's `fast_mode_disabled_reason` values.
+ *  Every reason is explained except the two in
+ *  {@link FAST_MODE_UNEXPLAINED_REASONS}; a code missing here gets the generic
+ *  text from {@link explainFastModeDisabledReason}.
+ *
+ *  `preference` and `unknown` were left out until upstream #1602: behind an API
+ *  gateway that authenticates with `ANTHROPIC_AUTH_TOKEN` only, Claude Code
+ *  reports `preference` on every turn without asking the server, so the toggle
+ *  snapped off with no reason. */
 const FAST_MODE_UNAVAILABLE_EXPLANATIONS: Partial<Record<FastModeDisabledReason, string>> = {
   free: "not available on the free plan",
   extra_usage_disabled: "requires extra usage to be enabled for this account",
@@ -10576,17 +10574,38 @@ const FAST_MODE_UNAVAILABLE_EXPLANATIONS: Partial<Record<FastModeDisabledReason,
   not_first_party: "not available on this API provider",
   disabled_by_env: "disabled by environment configuration",
   network_error: "eligibility could not be verified (network error)",
+  preference: "not enabled for your organization or API gateway",
+  unknown: "currently unavailable",
 };
 
+/** Reasons that are never explained:
+ *   - `sdk_opt_in_required`: every SDK session starts here (the toggle IS the
+ *     opt-in), so it describes the default, not a problem.
+ *   - `pending`: eligibility is still resolving; the next report supersedes it. */
+const FAST_MODE_UNEXPLAINED_REASONS: ReadonlySet<FastModeDisabledReason> = new Set([
+  "sdk_opt_in_required",
+  "pending",
+]);
+
+/** The user-facing explanation of a `fast_mode_disabled_reason`: `undefined`
+ *  for no reason, `sdk_opt_in_required` or `pending`; the table text when there
+ *  is one; else a generic text naming the code (a reason a newer SDK added). */
+export function explainFastModeDisabledReason(
+  reason: FastModeDisabledReason | undefined,
+): string | undefined {
+  if (reason === undefined || FAST_MODE_UNEXPLAINED_REASONS.has(reason)) return undefined;
+  return FAST_MODE_UNAVAILABLE_EXPLANATIONS[reason] ?? `not available (${reason})`;
+}
+
 /** Normalize an SDK-reported `fast_mode_disabled_reason` to the one we retain:
- *  a reason we have an explanation for, else `undefined`. Keeping only
- *  explainable reasons means state comparisons (see `syncFastModeState`) track
- *  exactly what the user can see, so routine reports like
- *  `sdk_opt_in_required` never churn the config option. */
+ *  a reason {@link explainFastModeDisabledReason} explains (including codes a
+ *  newer SDK adds), else `undefined`. State comparisons (see
+ *  `syncFastModeState`) then track exactly what the user can see, so
+ *  `sdk_opt_in_required` and `pending` never churn the config option. */
 export function normalizeFastModeDisabledReason(
   reason: FastModeDisabledReason | undefined,
 ): FastModeDisabledReason | undefined {
-  return reason && FAST_MODE_UNAVAILABLE_EXPLANATIONS[reason] ? reason : undefined;
+  return explainFastModeDisabledReason(reason) !== undefined ? reason : undefined;
 }
 
 /** Whether the Client advertised support for boolean session config options
@@ -10614,9 +10633,7 @@ export function createFastModeConfigOption(
   useBooleanOption: boolean,
   disabledReason?: FastModeDisabledReason,
 ): SessionConfigOption {
-  const explanation = enabled
-    ? undefined
-    : disabledReason && FAST_MODE_UNAVAILABLE_EXPLANATIONS[disabledReason];
+  const explanation = enabled ? undefined : explainFastModeDisabledReason(disabledReason);
   const base = {
     id: FAST_MODE_CONFIG_ID,
     name: "Fast mode",
