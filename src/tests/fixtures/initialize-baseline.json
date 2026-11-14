@@ -13,6 +13,15 @@
           },
           "_claude/usage": {
             "version": 1
+          },
+          "_claude/btw": {
+            "version": 1
+          },
+          "_claude/rewind": {
+            "version": 1
+          },
+          "_claude/context": {
+            "version": 1
           }
         },
         "promptCapabilities": {
@@ -71,6 +80,15 @@
             "version": 2
           },
           "_claude/usage": {
+            "version": 1
+          },
+          "_claude/btw": {
+            "version": 1
+          },
+          "_claude/rewind": {
+            "version": 1
+          },
+          "_claude/context": {
             "version": 1
           }
         },
@@ -145,6 +163,15 @@
             "version": 2
           },
           "_claude/usage": {
+            "version": 1
+          },
+          "_claude/btw": {
+            "version": 1
+          },
+          "_claude/rewind": {
+            "version": 1
+          },
+          "_claude/context": {
             "version": 1
           }
         },
@@ -234,6 +261,15 @@
           },
           "_claude/usage": {
             "version": 1
+          },
+          "_claude/btw": {
+            "version": 1
+          },
+          "_claude/rewind": {
+            "version": 1
+          },
+          "_claude/context": {
+            "version": 1
           }
         },
         "promptCapabilities": {
@@ -313,6 +349,15 @@
             "version": 2
           },
           "_claude/usage": {
+            "version": 1
+          },
+          "_claude/btw": {
+            "version": 1
+          },
+          "_claude/rewind": {
+            "version": 1
+          },
+          "_claude/context": {
             "version": 1
           }
         },
@@ -402,6 +447,15 @@
           },
           "_claude/usage": {
             "version": 1
+          },
+          "_claude/btw": {
+            "version": 1
+          },
+          "_claude/rewind": {
+            "version": 1
+          },
+          "_claude/context": {
+            "version": 1
           }
         },
         "promptCapabilities": {
@@ -475,6 +529,15 @@
             "version": 2
           },
           "_claude/usage": {
+            "version": 1
+          },
+          "_claude/btw": {
+            "version": 1
+          },
+          "_claude/rewind": {
+            "version": 1
+          },
+          "_claude/context": {
             "version": 1
           }
         },
