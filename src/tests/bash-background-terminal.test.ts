@@ -93,6 +93,13 @@ function bashBackgroundResult(
   };
 }
 
+/** A tool result as Claude Code sends it for a subagent: no `tool_use_result`. */
+function withoutStructuredResult(message: Record<string, unknown>) {
+  const bare = { ...message };
+  delete bare.tool_use_result;
+  return bare;
+}
+
 const taskUpdated = (sessionId: string, taskId: string, patch: Record<string, unknown>) => ({
   type: "system",
   subtype: "task_updated",
@@ -252,6 +259,52 @@ describe("a backgrounded command's terminal (item 92, upstream #1312)", () => {
       claudeCode: { parentToolUseId: "toolu_agent" },
       terminal_exit: { terminal_id: id, exit_code: 1, signal: null },
     });
+  });
+
+  // Upstream #1540, as seen live on CLI 2.1.318: a subagent's tool result has
+  // no `tool_use_result`, so only the `task_started` that named the Bash call
+  // says the command went to the background. Taken as finished, its terminal
+  // exited (code 0) at once while the command still ran.
+  it("keeps a subagent's background command running when its result has no tool_use_result", async () => {
+    const s = await startSession();
+    const id = "toolu_b9";
+    const bare = withoutStructuredResult(
+      bashBackgroundResult(s.sessionId, id, "b9", "toolu_agent"),
+    );
+    await s.turn(
+      bashToolUse(s.sessionId, id, "toolu_agent"),
+      taskStarted(s.sessionId, "b9", { tool_use_id: id, owned_by_subagent: true }),
+      bare,
+    );
+    expect(s.exits(id)).toEqual([]);
+
+    s.query.out.push(
+      taskNotification(s.sessionId, "b9", {
+        status: "failed",
+        summary: 'Background command "Wait" failed with exit code 3',
+      }),
+    );
+    await waitFor(() => s.exits(id).length > 0, "b9's exit");
+    expect(s.exits(id)[0]).toEqual({
+      claudeCode: { parentToolUseId: "toolu_agent" },
+      terminal_exit: { terminal_id: id, exit_code: 3, signal: null },
+    });
+  });
+
+  // The fallback names only a backgrounded shell task: a foreground command's
+  // task, or another task type that a tool call started, ends with its result.
+  it("exits at the result when the only task the call started ran in the foreground", async () => {
+    const s = await startSession();
+    const id = "toolu_b10";
+    const bare = withoutStructuredResult(
+      bashBackgroundResult(s.sessionId, id, "b10", "toolu_agent"),
+    );
+    await s.turn(
+      bashToolUse(s.sessionId, id, "toolu_agent"),
+      taskStarted(s.sessionId, "b10", { tool_use_id: id, is_backgrounded: false }),
+      bare,
+    );
+    expect(s.exits(id)).toHaveLength(1);
   });
 
   it("sends no terminal exit at all to a client that does not render terminals", async () => {
