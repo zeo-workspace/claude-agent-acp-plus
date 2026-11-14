@@ -250,9 +250,9 @@ describe("a resumed session's context ring starts where the session left off (B3
     await agent.newSession({ cwd: projectDir, mcpServers: [] });
 
     await vi.waitFor(() => expect(quotaUpdates(notifications).length).toBeGreaterThan(0));
-    // 200_000 is the default window: a fresh session has neither an occupancy
-    // nor an authoritative window until its first turn confirms one.
-    expect(quotaUpdates(notifications)).toEqual([{ used: 0, size: 200_000 }]);
+    // 1_000_000 is the default window (upstream #1613): a fresh session has
+    // neither an occupancy nor an authoritative window until one is read.
+    expect(quotaUpdates(notifications)).toEqual([{ used: 0, size: 1_000_000 }]);
     expect(getContextUsage).toHaveBeenCalledOnce();
   });
 
@@ -322,7 +322,7 @@ describe("a resumed session's context ring starts where the session left off (B3
     // the quota payload falls back to 0 exactly as it did before the seeding.
     expect(agent.sessions[SESSION_ID]?.contextUsedTokens).toBeUndefined();
     await vi.waitFor(() => expect(quotaUpdates(notifications).length).toBeGreaterThan(0));
-    expect(quotaUpdates(notifications)).toEqual([{ used: 0, size: 200_000 }]);
+    expect(quotaUpdates(notifications)).toEqual([{ used: 0, size: 1_000_000 }]);
   });
 
   /**

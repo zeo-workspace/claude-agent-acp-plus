@@ -926,13 +926,17 @@ describe("session config options", () => {
       return (agent as unknown as { sessions: Record<string, any> }).sessions[SESSION_ID];
     }
 
-    it("seeds the window from text inference on model switch", async () => {
-      // The window is seeded synchronously from the text heuristic (here via
-      // the new model's resolvedModel); the background refresh never answers.
+    // Upstream #1613: no "1m" text heuristic any more. A row whose names say
+    // "1m" gets the default like any other, and a 200K model shows 1M only
+    // until the background read lands.
+    it("seeds the default window on model switch, whatever the row's names say", async () => {
       const session = getSession();
+      session.contextWindowSize = 200_000;
       session.query.getContextUsage = vi.fn(() => new Promise<never>(() => {}));
       session.modelInfos = session.modelInfos.map((m: ModelInfo) =>
-        m.value === "claude-sonnet-4-6" ? { ...m, resolvedModel: "claude-sonnet-5[1m]" } : m,
+        m.value === "claude-sonnet-4-6"
+          ? { ...m, resolvedModel: "claude-sonnet-4-6", description: "Sonnet (200K context)" }
+          : m,
       );
 
       await agent.setSessionConfigOption({
@@ -945,15 +949,13 @@ describe("session config options", () => {
       expect(session.contextWindowAuthoritative).toBe(false);
     });
 
-    it("falls back to the default window when inference misses, then refines it in the background", async () => {
+    it("seeds the default window on a cache miss, then replaces it in the background", async () => {
       const session = getSession();
-      session.contextWindowSize = 1_000_000;
+      session.contextWindowSize = 200_000;
       let answer!: (usage: { rawMaxTokens: number }) => void;
       session.query.getContextUsage = vi.fn(
         () => new Promise<{ rawMaxTokens: number }>((resolve) => (answer = resolve)),
       );
-      // claude-sonnet-4-6 carries no "1m" token in its id, resolvedModel,
-      // displayName, or description, so inference misses → default window.
 
       await agent.setSessionConfigOption({
         sessionId: SESSION_ID,
@@ -964,10 +966,10 @@ describe("session config options", () => {
       // The switch resolved without waiting for getContextUsage.
       expect(session.query.getContextUsage).toHaveBeenCalledOnce();
       expect(session.query.getContextUsage).toHaveBeenCalledWith({ detail: "summary" });
-      expect(session.contextWindowSize).toBe(200000);
+      expect(session.contextWindowSize).toBe(1_000_000);
 
-      answer({ rawMaxTokens: 967000 });
-      await vi.waitFor(() => expect(session.contextWindowSize).toBe(967000));
+      answer({ rawMaxTokens: 200_000 });
+      await vi.waitFor(() => expect(session.contextWindowSize).toBe(200_000));
       expect(session.contextWindowAuthoritative).toBe(true);
     });
 

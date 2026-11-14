@@ -101,7 +101,9 @@ export function mockSessionState(
     abortController: new AbortController(),
     emitRawSDKMessages: false,
     forwardSubagentText: false,
-    contextWindowSize: 200000,
+    // A real session starts on the default window (upstream #1613: 1M), and
+    // a 200K non-authoritative window can no longer occur.
+    contextWindowSize: 1_000_000,
     contextWindowAuthoritative: false,
     providerCacheKey: "default",
     taskState: new Map(),
