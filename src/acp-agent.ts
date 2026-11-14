@@ -164,6 +164,19 @@ import {
 } from "./plan-updates.js";
 import { planRemovedUpdate, planSessionUpdate, supportsPlanOperations } from "./keyed-plan.js";
 import { handleRewindCommand, parseRewindInvocation, RewindDeps } from "./rewind-command.js";
+import {
+  askSideQuestion,
+  BTW_CAPABILITY_KEY,
+  BTW_CAPABILITY_VERSION,
+  BTW_METHOD,
+  BTW_USAGE_TEXT,
+  formatSideAnswer,
+  parseBtwInvocation,
+  parseSideQuestionRequest,
+  type SideQuestionQuery,
+  type SideQuestionRequest,
+  type SideQuestionResult,
+} from "./side-question.js";
 import { resolvePermissionMode, sessionAllowsBypass } from "./permissions/modes.js";
 import { normalizeDurablePermissionChangeSet } from "./permissions/normalization.js";
 import { buildClaudePermissionOptions } from "./permissions/options.js";
@@ -2483,6 +2496,7 @@ export class ClaudeAcpAgent {
             version: this.childSessions ? TASKS_RFD_CONTRACT_VERSION : TASKS_CAPABILITY_VERSION,
           },
           [USAGE_CAPABILITY_KEY]: { version: USAGE_CAPABILITY_VERSION },
+          [BTW_CAPABILITY_KEY]: { version: BTW_CAPABILITY_VERSION },
         },
         promptCapabilities: {
           image: true,
@@ -2791,6 +2805,28 @@ export class ClaudeAcpAgent {
     // emits every user-facing update before it resolves, so returning end_turn
     // here leaves Zed with a complete turn rather than an empty/hung one.
     const commandText = params.prompt[0]?.type === "text" ? params.prompt[0].text : "";
+
+    // `/btw` typed into a composer (§6.8): a side question answered as an
+    // aside, never enqueued and never added to the model's history, so it may
+    // run while a turn is in flight. Zeo uses `_claude/btw` instead.
+    const btwInvocation = parseBtwInvocation(commandText);
+    if (btwInvocation) {
+      const text =
+        btwInvocation.kind === "usage"
+          ? BTW_USAGE_TEXT
+          : formatSideAnswer(
+              await this.sideQuestion({
+                sessionId: params.sessionId,
+                question: btwInvocation.question,
+              }),
+            );
+      await this.client.sessionUpdate({
+        sessionId: params.sessionId,
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+      });
+      return { stopReason: "end_turn" };
+    }
+
     const rewindInvocation = parseRewindInvocation(commandText);
     if (rewindInvocation) {
       // A lazy Thinking recreate may be swapping the session's query right
@@ -3152,6 +3188,44 @@ export class ClaudeAcpAgent {
     // A quota refresh is never a reason to keep the process alive.
     timer.unref?.();
     session.accountUsageTimer = timer;
+  }
+
+  /**
+   * `_claude/btw`: answer a side question without touching the conversation
+   * (see side-question.ts). Allowed while a turn runs — that is the point —
+   * and never enqueued: the CLI's `side_question` control request answers
+   * beside the turn. Only an unknown session is an error; every other outcome,
+   * an ended session included, is a result the client can show.
+   */
+  async sideQuestion(
+    params: SideQuestionRequest,
+    signal?: AbortSignal,
+  ): Promise<SideQuestionResult> {
+    const { sessionId, question } = params;
+    const log = (outcome: string) =>
+      this.logger.log(
+        `[btw] method=${BTW_METHOD} sessionId=${logValue(sessionId)} questionChars=${question.length} outcome=${outcome}`,
+      );
+    const session = Object.hasOwn(this.sessions, sessionId) ? this.sessions[sessionId] : undefined;
+    if (!session) {
+      log("error_unknown_session");
+      throw RequestError.invalidParams(undefined, `unknown session ${sessionId}`);
+    }
+    if (session.queryClosed) {
+      log("failed_session_ended");
+      return { status: "failed", message: SESSION_ENDED_MESSAGE };
+    }
+    // A Thinking recreate may be swapping the query; ask the live one.
+    if (session.queryRecreateInFlight) {
+      await session.queryRecreateInFlight;
+    }
+    const result = await askSideQuestion(
+      session.query as unknown as SideQuestionQuery,
+      question,
+      signal,
+    );
+    log(result.status);
+    return result;
   }
 
   /**
@@ -11650,6 +11724,15 @@ function getAvailableSlashCommands(
     });
   }
 
+  // `/btw` is answered by the adapter too (§6.8); the SDK lists no such command.
+  if (!advertised.some((command) => command.name === "btw")) {
+    advertised.push({
+      name: "btw",
+      description: "Ask a side question. The answer is not added to the conversation.",
+      input: { hint: "question" },
+    });
+  }
+
   return advertised;
 }
 
@@ -12731,6 +12814,11 @@ export function runAcp(logger?: Logger) {
       USAGE_REFRESH_METHOD,
       { parse: parseUsageRefreshRequest },
       (ctx) => agent.refreshUsage(ctx.params),
+    )
+    .onRequest<SideQuestionRequest, SideQuestionResult>(
+      BTW_METHOD,
+      { parse: parseSideQuestionRequest },
+      (ctx) => agent.sideQuestion(ctx.params, ctx.signal),
     )
     .onRequest<GoalRequest, GoalControlResponse>(
       GOAL_CONTROL_METHOD,

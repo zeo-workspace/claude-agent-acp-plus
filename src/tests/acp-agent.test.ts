@@ -7144,12 +7144,13 @@ describe("terminal slash command filtering", () => {
     const updates = sessionUpdate.mock.calls.map((c: any[]) => (c[0] as { update: any }).update);
     const commandsUpdate = updates.find((u) => u.sessionUpdate === "available_commands_update");
     expect(commandsUpdate).toBeDefined();
-    // `rewind` is the fork's own slash command (story 009); upstream's copy of this
-    // assertion does not know about it. It is not terminal-bound, so it survives the
-    // latch exactly as `compact` does.
+    // `rewind` (story 009) and `btw` (Zeo proposal §6.8) are the fork's own slash
+    // commands; upstream's copy of this assertion knows neither. Neither is
+    // terminal-bound, so both survive the latch exactly as `compact` does.
     expect(commandsUpdate.availableCommands.map((c: { name: string }) => c.name)).toEqual([
       "compact",
       "rewind",
+      "btw",
     ]);
   });
 
