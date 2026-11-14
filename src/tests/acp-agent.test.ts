@@ -6159,6 +6159,59 @@ describe("stop reason propagation", () => {
     expect((err as { data: unknown }).data).toEqual({ errorKind: "rate_limit" });
   });
 
+  // Upstream #1610: a message refused at the limit fails before its first
+  // usage, so no usage_update carries the reset time. The error does.
+  it("adds the turn's rate limit to a rate-limit failure's data", async () => {
+    const agent = createMockAgent();
+    const rateLimit = { status: "rejected", resetsAt: 1700000000, rateLimitType: "five_hour" };
+    injectSession(agent, [
+      {
+        type: "rate_limit_event",
+        rate_limit_info: rateLimit,
+        uuid: randomUUID(),
+        session_id: "test-session",
+      } as any,
+      createAssistantError("rate_limit"),
+      createResultMessage({
+        subtype: "success",
+        stop_reason: "end_turn",
+        is_error: true,
+        result: "You've hit your 5-hour limit · resets 5:30pm (America/Los_Angeles)",
+      }),
+    ]);
+
+    await expect(
+      agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] }),
+    ).rejects.toMatchObject({ data: { errorKind: "rate_limit", rateLimit } });
+  });
+
+  it("keeps a turn's rate limit out of a failure of another kind", async () => {
+    const agent = createMockAgent();
+    injectSession(agent, [
+      {
+        type: "rate_limit_event",
+        rate_limit_info: { status: "allowed_warning", rateLimitType: "five_hour" },
+        uuid: randomUUID(),
+        session_id: "test-session",
+      } as any,
+      createAssistantError("server_error"),
+      createResultMessage({
+        subtype: "success",
+        stop_reason: "end_turn",
+        is_error: true,
+        result: "API Error: 500",
+      }),
+    ]);
+
+    const err = await agent
+      .prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] })
+      .then(
+        () => null,
+        (e) => e,
+      );
+    expect((err as { data: unknown }).data).toEqual({ errorKind: "server_error" });
+  });
+
   it.each(
     [false, true].flatMap((typedFailures) =>
       [undefined, "authentication_failed" as const].map((staleError) => ({
