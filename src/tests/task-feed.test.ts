@@ -471,10 +471,17 @@ describe("TaskFeed — an ended task is published once (R1.6)", () => {
 });
 
 describe("TaskFeed — ambient tasks (R1.7)", () => {
+  // Claude Code marks `ambient` its own housekeeping and every live-update
+  // watcher, "requested or auto-started" (SDK docs). The ones it starts by
+  // itself name no tool call.
   it("leaves an ambient task out of every snapshot, through its whole life", () => {
     const { feed } = makeFeed();
 
-    expect(feed.onStarted(started("w1", { ambient: true, task_type: "monitor" }))).toBe("none");
+    expect(
+      feed.onStarted(
+        started("w1", { ambient: true, task_type: "local_monitor", tool_use_id: undefined }),
+      ),
+    ).toBe("none");
     feed.onProgress(progress("w1"));
     expect(publish(feed)).toEqual({ tasks: [] });
 
@@ -485,11 +492,40 @@ describe("TaskFeed — ambient tasks (R1.7)", () => {
   it("filters only the ambient task, not a non-ambient one that looks the same", () => {
     const { feed, at } = makeFeed();
     at(1);
-    feed.onStarted(started("w1", { ambient: true, description: "Watch logs" }));
+    feed.onStarted(
+      started("w1", { ambient: true, description: "Watch logs", tool_use_id: undefined }),
+    );
     at(2);
     feed.onStarted(started("w2", { ambient: false, description: "Watch logs" }));
 
     expect(ids(publish(feed))).toEqual(["w2"]);
+  });
+
+  // Upstream #1538's rule on the v1 feed: the task of a `Monitor` call the
+  // model made is ambient too, but a tool call started it, so it is work the
+  // operator can see and stop (`_claude/tasks/stop` reads the feed).
+  it("keeps an ambient task that a tool call started, such as a Monitor call's", () => {
+    const { feed } = makeFeed();
+
+    expect(
+      feed.onStarted(
+        started("m1", {
+          ambient: true,
+          task_type: "local_monitor",
+          tool_use_id: "toolu_monitor",
+          description: "Watch the logs",
+        }),
+      ),
+    ).toBe("progress");
+    const snapshot = publish(feed);
+    expect(byId(snapshot, "m1")).toMatchObject({
+      toolCallId: "toolu_monitor",
+      status: "running",
+      description: "Watch the logs",
+    });
+
+    feed.onNotification(notification("m1", { status: "stopped" }));
+    expect(byId(publish(feed), "m1").status).toBe("stopped");
   });
 });
 

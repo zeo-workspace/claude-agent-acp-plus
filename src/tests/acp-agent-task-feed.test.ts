@@ -140,10 +140,15 @@ describe("task feed wiring — a background shell's life (R1.1, R1.4, R1.6)", ()
     }
   });
 
-  it("does not publish an ambient task", async () => {
+  it("does not publish an ambient task that Claude Code started by itself", async () => {
     const s = await startSession();
     await s.turn(
-      taskStarted(s.sessionId, "watch", { ambient: true }),
+      // No tool call started it: housekeeping (upstream #1538's rule).
+      taskStarted(s.sessionId, "watch", {
+        ambient: true,
+        task_type: "local_monitor",
+        tool_use_id: undefined,
+      }),
       taskStarted(s.sessionId, "b1"),
     );
     await waitFor(() => s.tasksSnapshots().length > 0, "a snapshot");
@@ -151,6 +156,23 @@ describe("task feed wiring — a background shell's life (R1.1, R1.4, R1.6)", ()
     for (const snapshot of s.tasksSnapshots()) {
       expect(find(snapshot, "watch")).toBeUndefined();
     }
+  });
+
+  it("publishes the ambient task of a Monitor call the model made (upstream #1538)", async () => {
+    const s = await startSession();
+    await s.turn(
+      taskStarted(s.sessionId, "mon1", {
+        ambient: true,
+        task_type: "local_monitor",
+        tool_use_id: "toolu_monitor",
+      }),
+    );
+    await waitFor(() => s.tasksSnapshots().length > 0, "a snapshot");
+
+    expect(find(s.tasksSnapshots().at(-1)!, "mon1")).toMatchObject({
+      toolCallId: "toolu_monitor",
+      status: "running",
+    });
   });
 
   it("carries progress for a running subagent in a later snapshot", async () => {
