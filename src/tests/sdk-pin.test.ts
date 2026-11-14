@@ -57,6 +57,13 @@ import { fileURLToPath } from "node:url";
  *     worktree sandbox escape), and background Bash commands that finish at once
  *     no longer lose their output.
  *
+ *   - **0.3.319 -> 0.3.325, 2026-11-13, by hand (parity round 25, item 215).**
+ *     With ACP SDK 2.6.0, inside the cooldown by operator decision (item 214).
+ *     CLI 2.1.321-2.1.325 carry Bash-permission and sandbox fixes. It lands with
+ *     the two adapter changes the bundled CLI 2.1.323 needs (upstream #1612's
+ *     hook-heartbeat drop, #1613's 1M placeholder window). The
+ *     background-subagent probe was NOT re-run for it.
+ *
  * Neither measurement is a regression test, and that is the point of the
  * paragraph below: re-measure on the next crossing rather than trusting green.
  *
@@ -91,7 +98,7 @@ const MIRROR_ROOT = join(HERE, "..", "..");
 const FORK_ROOT = join(MIRROR_ROOT, "..", "fork");
 
 const SDK = "@anthropic-ai/claude-agent-sdk";
-const PINNED = "0.3.319";
+const PINNED = "0.3.325";
 
 function readJson(path: string): Record<string, any> {
   return JSON.parse(readFileSync(path, "utf8"));

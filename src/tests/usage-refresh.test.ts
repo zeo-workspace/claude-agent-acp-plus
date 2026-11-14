@@ -134,7 +134,7 @@ describe("_claude/usage/refresh — outcomes", () => {
     expect(payloads[2]).toMatchObject({ utilization: 0.25 });
     // The same frame the turn end publishes: `usage_update` with both numbers.
     const frame = notifications[0].update as any;
-    expect(frame).toMatchObject({ sessionUpdate: "usage_update", used: 0, size: 200000 });
+    expect(frame).toMatchObject({ sessionUpdate: "usage_update", used: 0, size: 1_000_000 });
     expect(notifications.every((n) => n.sessionId === SESSION_ID)).toBe(true);
   });
 
