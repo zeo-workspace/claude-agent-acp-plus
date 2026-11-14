@@ -61,6 +61,7 @@ import {
   FastModeDisabledReason,
   FastModeState,
   getSessionMessages,
+  forkSession as sdkForkSession,
   getSubagentMessages,
   listSessions,
   McpServerConfig,
@@ -177,6 +178,18 @@ import {
   type SideQuestionRequest,
   type SideQuestionResult,
 } from "./side-question.js";
+import {
+  FORK_AT_META_KEY,
+  parseRewindRequest,
+  planFork,
+  REWIND_CAPABILITY_KEY,
+  REWIND_CAPABILITY_VERSION,
+  REWIND_METHOD,
+  rewindSession,
+  type RewindRequest,
+  type RewindResult,
+} from "./session-rewind.js";
+import { parseCutAt, type TranscriptRow } from "./turn-cut.js";
 import { resolvePermissionMode, sessionAllowsBypass } from "./permissions/modes.js";
 import { normalizeDurablePermissionChangeSet } from "./permissions/normalization.js";
 import { buildClaudePermissionOptions } from "./permissions/options.js";
@@ -2497,6 +2510,7 @@ export class ClaudeAcpAgent {
           },
           [USAGE_CAPABILITY_KEY]: { version: USAGE_CAPABILITY_VERSION },
           [BTW_CAPABILITY_KEY]: { version: BTW_CAPABILITY_VERSION },
+          [REWIND_CAPABILITY_KEY]: { version: REWIND_CAPABILITY_VERSION },
         },
         promptCapabilities: {
           image: true,
@@ -2564,6 +2578,14 @@ export class ClaudeAcpAgent {
 
   async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
     if (this.providerUpdate) await this.providerUpdate;
+    // A cut point under `_meta["_claude/forkAt"]` forks from that turn (§6.33);
+    // without one the fork copies the whole session, as before.
+    const rawCut = params._meta?.[FORK_AT_META_KEY];
+    const plan = await planFork(
+      this.sessionCutDeps(params.sessionId),
+      params.sessionId,
+      rawCut === undefined ? undefined : parseCutAt(rawCut, `session/fork ${FORK_AT_META_KEY}`),
+    );
     const response = await this.createSession(
       {
         cwd: params.cwd,
@@ -2571,10 +2593,7 @@ export class ClaudeAcpAgent {
         additionalDirectories: params.additionalDirectories,
         _meta: params._meta,
       },
-      {
-        resume: params.sessionId,
-        forkSession: true,
-      },
+      plan,
     );
     // Needs to happen after we return the session
     setTimeout(() => {
@@ -3188,6 +3207,59 @@ export class ClaudeAcpAgent {
     // A quota refresh is never a reason to keep the process alive.
     timer.unref?.();
     session.accountUsageTimer = timer;
+  }
+
+  /** Transcript reads and copies for a cut at a turn (fork and rewind). */
+  private sessionCutDeps(sessionId: string) {
+    return {
+      readTranscript: async () =>
+        (await getSessionMessages(sessionId)) as unknown as TranscriptRow[],
+      messageIdToUuid: this.sessions[sessionId]?.messageIdToUuid ?? new Map<string, string>(),
+      forkTranscript: async (upToUuid: string) =>
+        (await sdkForkSession(sessionId, { upToMessageId: upToUuid })).sessionId,
+    };
+  }
+
+  /**
+   * `_claude/rewind`: take the session back to the end of a turn, files
+   * optionally included (see session-rewind.ts). Refused as `busy` while a turn
+   * is active or queued, or another rewind runs — the same idleness rule as
+   * `/rewind`, for the same reason: never restore files under a running edit.
+   * The answer names a NEW session holding the kept turns; this session is
+   * left as it is for the client to replace.
+   */
+  async rewind(params: RewindRequest): Promise<RewindResult> {
+    const { sessionId } = params;
+    const log = (outcome: string) =>
+      this.logger.log(
+        `[rewind] method=${REWIND_METHOD} sessionId=${logValue(sessionId)} restoreFiles=${params.restoreFiles} outcome=${outcome}`,
+      );
+    const session = Object.hasOwn(this.sessions, sessionId) ? this.sessions[sessionId] : undefined;
+    if (!session) {
+      log("error_unknown_session");
+      throw RequestError.invalidParams(undefined, `unknown session ${sessionId}`);
+    }
+    if (session.queryRecreateInFlight) {
+      await session.queryRecreateInFlight;
+    }
+    if (session.turnQueue?.length || session.activeTurn || session.rewindInFlight) {
+      log("busy");
+      return { status: "busy" };
+    }
+    session.rewindInFlight = true;
+    try {
+      const result = await rewindSession(
+        {
+          ...this.sessionCutDeps(sessionId),
+          rewindFiles: (uuid) => session.query.rewindFiles(uuid),
+        },
+        params,
+      );
+      log(result.status === "failed" ? `failed_${result.stage}` : result.status);
+      return result;
+    } finally {
+      session.rewindInFlight = false;
+    }
   }
 
   /**
@@ -12814,6 +12886,9 @@ export function runAcp(logger?: Logger) {
       USAGE_REFRESH_METHOD,
       { parse: parseUsageRefreshRequest },
       (ctx) => agent.refreshUsage(ctx.params),
+    )
+    .onRequest<RewindRequest, RewindResult>(REWIND_METHOD, { parse: parseRewindRequest }, (ctx) =>
+      agent.rewind(ctx.params),
     )
     .onRequest<SideQuestionRequest, SideQuestionResult>(
       BTW_METHOD,
