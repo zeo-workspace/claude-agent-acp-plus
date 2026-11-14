@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.38.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.37.1...v0.38.0) (2026-11-14)
+
+
+### Features
+
+* a rate-limit failure carries the turn's rate limit as data.rateLimit ([#1610](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1610)) ([00ea2a4](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/00ea2a4f85d77e54229fa932d0fc27fb6c61be63))
+* **btw:** side questions answered beside the turn (_claude/btw, /btw) ([71fd15f](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/71fd15f6847e7627ca86c3e21c5ee53c5490cb15))
+* **context:** the context window's breakdown on demand (_claude/context/usage) ([d249d33](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/d249d3308997dd5ebd61338606291695304b8ce4))
+* **fork:** fork from a turn and rewind to it (_claude/forkAt, _claude/rewind) ([ad03687](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/ad03687e76c970cdb75947f26752dbc6f7eeab41))
+
+
+### Bug Fixes
+
+* **deps:** agent SDK 0.3.325 and ACP SDK 2.6.0, with hook heartbeats dropped and a 1M placeholder window ([#1612](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1612), [#1613](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1613)) ([175047f](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/175047fe103d2d4282df2a81249aa866ad4132f6))
+* explain Fast mode turned off for preference, unknown, or a new code ([#1602](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1602)) ([06079d8](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/06079d8ff24107bee177244b99b204791dd16fe9))
+* fail the tool calls of a response Claude Code took back ([#1616](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1616)) ([647b519](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/647b5190287d988b8e8f6250f90b6d31408d3890))
+* settle live steers folded into autonomous cycles ([#1185](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1185)) ([fb1f3b0](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/fb1f3b0bfe2e5d1696c650ec931feab1d1108f6a))
+* settle steered turns on the result that answers the steer ([#1166](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1166)) ([fc9f571](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/fc9f571c0dbb2901a14ee9de9627319af208918d))
+* **tasks:** a Monitor the model called reaches the tasks feed ([#1538](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1538)) ([7a72d2b](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/7a72d2b4f5abf5b70fa1eeaadd059de2b6e3ce7d))
+* **tasks:** a subagent's background command keeps its terminal running ([#1540](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/1540)) ([31c6c76](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/31c6c766fc4ffc51f697ebdba85548ea4fd34c7b))
+
 ## [0.37.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.37.0...v0.37.1) (2026-11-13)
 
 
