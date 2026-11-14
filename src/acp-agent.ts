@@ -247,6 +247,7 @@ import { readSubagentLaunches, type SubagentLaunchRecord } from "./child-session
 import { findTranscript } from "./transcript-path.js";
 import { parseToolResultMeta } from "./tool-result-meta.js";
 import { progressToolCallId } from "./tool-progress-target.js";
+import { RETRACTED_TOOL_CALL_TEXT, RetractedToolCalls } from "./retracted-tool-calls.js";
 import { AccountUsageTracker } from "./account-usage.js";
 import { readFreshLimits, sharedSampleMaxAgeMs, writeLimits } from "./quota-cache.js";
 import {
@@ -1240,6 +1241,10 @@ export type Session = {
    *  call returns as soon as the command detaches); the exit goes out when the
    *  task ends. Only for a client that renders terminals. */
   backgroundTerminals?: Map<string, { toolCallId: string; parentToolUseId?: string }>;
+  /** Upstream #1616: the tool uses of the assistant messages, by `uuid`, to fail
+   *  the tool calls of a message that Claude Code takes back after a refusal
+   *  fallback (see {@link RetractedToolCalls}). Created on first use. */
+  retractedToolCalls?: RetractedToolCalls;
   /** The latest `run_id` seen on each task's events, so a late frame of an
    *  earlier run is dropped (see `isLateTaskRun`, upstream #1271). Run ids are
    *  per CLI process, so a query recreate clears it. Bounded by
@@ -4182,6 +4187,33 @@ export class ClaudeAcpAgent {
       });
     };
 
+    /** Upstream #1616: fails the open tool calls of the messages that `message`
+     *  says Claude Code took back. No result comes for them, so they would
+     *  spin in the client. A call whose result came is not open any more. */
+    const closeRetractedToolCalls = async (message: SDKMessage): Promise<void> => {
+      const retracted = (session.retractedToolCalls ??= new RetractedToolCalls()).retractedBy(
+        message,
+      );
+      for (const { toolCallId, parentToolUseId } of retracted) {
+        if (!session.emittedToolCalls.delete(toolCallId)) continue;
+        this.logger.log(
+          `[tool-call/retracted] sessionId=${params.sessionId} toolCallId=${toolCallId}`,
+        );
+        await sendUpdate({
+          sessionId: params.sessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId,
+            status: "failed",
+            content: [
+              { type: "content", content: { type: "text", text: RETRACTED_TOOL_CALL_TEXT } },
+            ],
+            ...(parentToolUseId ? { _meta: { claudeCode: { parentToolUseId } } } : {}),
+          },
+        });
+      }
+    };
+
     const turnAwaitingSubagents = (turn: Turn) => {
       if (!turn.spawnedTaskIds?.size) {
         return false;
@@ -5459,6 +5491,7 @@ export class ClaudeAcpAgent {
                 break;
               }
               case "model_refusal_fallback": {
+                await closeRetractedToolCalls(message);
                 // The SDK retried a refused turn on the fallback model and made
                 // the swap persistent for the session. Without a notice the
                 // user just sees regenerated output; without the state sync the
@@ -6435,6 +6468,14 @@ export class ClaudeAcpAgent {
               !this.childSessions?.childFor(params.sessionId, parentToolUseIdOf(message))
             ) {
               break;
+            }
+
+            // Upstream #1616: the first message of a retry names the response it
+            // replaces (`supersedes`); every assistant message is recorded so a
+            // later retraction can find its tool calls.
+            if (message.type === "assistant") {
+              await closeRetractedToolCalls(message);
+              (session.retractedToolCalls ??= new RetractedToolCalls()).sent(message);
             }
 
             // Synthetic assistant frames carry the CLI's local-command output.
