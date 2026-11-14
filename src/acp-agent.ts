@@ -77,6 +77,7 @@ import {
   SDKActiveGoalMessage,
   SDKMessage,
   SDKMessageOrigin,
+  SDKRateLimitInfo,
   SDKPartialAssistantMessage,
   SDKSystemMessage,
   SDKUserMessage,
@@ -3581,6 +3582,9 @@ export class ClaudeAcpAgent {
     // send it with (upstream #1534): with partial messages on, the SDK sends it
     // ahead of the first assistant frame. It rides the turn's next usage_update.
     let pendingRateLimit: unknown = null;
+    // The turn's latest rate_limit_event info, for the data of its failure
+    // (upstream #1610, see `errorKindData`).
+    let turnRateLimit: SDKRateLimitInfo | undefined;
     // When the Claude SDK classifies a turn as failed (e.g. rate limit, auth
     // problem, billing), it sets a categorical `error` field on the
     // `SDKAssistantMessage` that precedes the final `result` message. We capture
@@ -3793,6 +3797,7 @@ export class ClaudeAcpAgent {
       // usage_update to ride must not be attributed to the next turn. The
       // tracker already remembers its status (R1.6).
       pendingRateLimit = null;
+      turnRateLimit = undefined;
       lastAssistantError = undefined;
       lastAssistantWasUsageLimit = false;
       lastAssistantFailureTitle = undefined;
@@ -6043,7 +6048,10 @@ export class ClaudeAcpAgent {
                   if (message.is_error) {
                     await failActiveWithSessionFailure(
                       providerFailureCategory(lastAssistantError, lastAssistantWasUsageLimit),
-                      internalErrorForClient(errorKindData(lastAssistantError), message.result),
+                      internalErrorForClient(
+                        errorKindData(lastAssistantError, turnRateLimit),
+                        message.result,
+                      ),
                       lastAssistantFailureTitle ?? message.result,
                     );
                     break;
@@ -6105,7 +6113,7 @@ export class ClaudeAcpAgent {
                     await failActiveWithSessionFailure(
                       providerFailureCategory(lastAssistantError, lastAssistantWasUsageLimit),
                       internalErrorForClient(
-                        errorKindData(lastAssistantError),
+                        errorKindData(lastAssistantError, turnRateLimit),
                         message.errors.join(", ") || message.subtype,
                       ),
                       lastAssistantFailureTitle ?? (message.errors.join(", ") || message.subtype),
@@ -6120,7 +6128,7 @@ export class ClaudeAcpAgent {
                     await failActiveWithSessionFailure(
                       "budget_exhausted",
                       internalErrorForClient(
-                        errorKindData(lastAssistantError),
+                        errorKindData(lastAssistantError, turnRateLimit),
                         message.errors.join(", ") || message.subtype,
                       ),
                       message.errors.join(", ") || message.subtype,
@@ -6134,7 +6142,7 @@ export class ClaudeAcpAgent {
                     await failActiveWithSessionFailure(
                       "context_exhausted",
                       internalErrorForClient(
-                        errorKindData(lastAssistantError),
+                        errorKindData(lastAssistantError, turnRateLimit),
                         message.errors.join(", ") || message.subtype,
                       ),
                       message.errors.join(", ") || message.subtype,
@@ -6148,7 +6156,7 @@ export class ClaudeAcpAgent {
                     await failActiveWithSessionFailure(
                       "provider_error",
                       internalErrorForClient(
-                        errorKindData(lastAssistantError),
+                        errorKindData(lastAssistantError, turnRateLimit),
                         message.errors.join(", ") || message.subtype,
                       ),
                       message.errors.join(", ") || message.subtype,
@@ -6878,6 +6886,7 @@ export class ClaudeAcpAgent {
             // the same notification shape (R1.8); when the turn has no context
             // total yet, it waits for the turn's next usage_update (#1534).
             this.accountUsageTracker(session).recordMeasured(message.rate_limit_info);
+            turnRateLimit = message.rate_limit_info;
             if (lastAssistantTotalUsage === null) {
               pendingRateLimit = message.rate_limit_info;
             } else {
@@ -10366,11 +10375,18 @@ type AgentErrorKind = SDKAssistantMessageError | "no_result";
  * The `errorKind` field is a convention for ACP clients to dispatch on
  * without having to pattern-match the human-readable message text. Clients
  * that don't understand it fall back to the existing message-based rendering.
+ *
+ * For a `rate_limit` failure the turn's latest `rate_limit_event` info rides
+ * along as `rateLimit` (upstream #1610): its `resetsAt` says when the account
+ * can run again, and a message refused at the limit fails before its first
+ * usage, so no `usage_update` carries that info.
  */
 function errorKindData(
   errorKind: AgentErrorKind | undefined,
-): { errorKind: AgentErrorKind } | undefined {
-  return errorKind ? { errorKind } : undefined;
+  rateLimit?: SDKRateLimitInfo,
+): { errorKind: AgentErrorKind; rateLimit?: SDKRateLimitInfo } | undefined {
+  if (!errorKind) return undefined;
+  return errorKind === "rate_limit" && rateLimit ? { errorKind, rateLimit } : { errorKind };
 }
 
 /** Project a nullable API usage object into our non-null snapshot shape.
