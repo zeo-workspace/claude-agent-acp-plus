@@ -1212,6 +1212,11 @@ export type Session = {
        *  `blocksForeground`: a cancelled permission request of background work is a denial. */
       backgrounded?: boolean;
       parentTaskId?: string;
+      /** `task_started.task_type` (`local_bash`, `local_agent`, …). Upstream #1540: a
+       *  subagent's Bash result carries no `tool_use_result`, so a backgrounded
+       *  `local_bash` task whose `parentToolUseId` is the Bash call is what says the
+       *  command still runs (see `backgroundBashTerminal`). */
+      taskType?: string;
       /** Absent-from-level lifecycle, one field so the illegal
        *  armed-but-not-ended state is unrepresentable: undefined = live per
        *  the level signal; "ended" = a level omitted the task (holds stop
@@ -5289,6 +5294,7 @@ export class ClaudeAcpAgent {
                     ? { backgrounded: message.is_backgrounded }
                     : {}),
                   ...(message.parent_task_id ? { parentTaskId: message.parent_task_id } : {}),
+                  ...(message.task_type ? { taskType: message.task_type } : {}),
                 });
                 if (message.subagent_type && session.activeTurn && !session.activeTurn.settled) {
                   (session.activeTurn.spawnedTaskIds ??= new Set()).add(message.task_id);
@@ -12741,29 +12747,44 @@ function getMatchingModelUsage(modelUsage: Record<string, ModelUsage>, currentMo
 
 /**
  * Parity item 92: the Bash tool call and task of a command this result sent to
- * the background — the structured `BashOutput` carries `backgroundTaskId`, and
- * the message holds exactly one tool_result, of a Bash call.
+ * the background. The message holds exactly one tool_result, of a Bash call,
+ * and the task is the structured `BashOutput`'s `backgroundTaskId`.
+ *
+ * Upstream #1540: Claude Code sends no `tool_use_result` with a subagent's tool
+ * results (none of 35 across CLI 2.1.293–2.1.318, per upstream). Without one,
+ * the task is the live backgrounded `local_bash` task whose `task_started`
+ * named this Bash call, which comes before the result. A failed result never
+ * names one: the command did not start.
  */
 function backgroundBashTerminal(
   message: { type: string; tool_use_result?: unknown },
   content: unknown,
-  session: Pick<Session, "toolUseCache">,
+  session: Pick<Session, "toolUseCache" | "liveBackgroundTasks">,
 ): { taskId: string; toolCallId: string } | undefined {
   if (message.type !== "user" || !Array.isArray(content)) return undefined;
-  const result = message.tool_use_result;
-  if (typeof result !== "object" || result === null || !("backgroundTaskId" in result)) {
-    return undefined;
-  }
-  const taskId = result.backgroundTaskId;
-  if (typeof taskId !== "string" || taskId === "") return undefined;
   const blocks = content.filter(
-    (c): c is { type: "tool_result"; tool_use_id: string } =>
+    (c): c is { type: "tool_result"; tool_use_id: string; is_error?: boolean } =>
       typeof c === "object" && c !== null && c.type === "tool_result",
   );
   if (blocks.length !== 1) return undefined;
   const toolCallId = blocks[0].tool_use_id;
   if (session.toolUseCache[toolCallId]?.name !== "Bash") return undefined;
-  return { taskId, toolCallId };
+  const result = message.tool_use_result;
+  if (typeof result === "object" && result !== null && "backgroundTaskId" in result) {
+    const taskId = result.backgroundTaskId;
+    return typeof taskId === "string" && taskId !== "" ? { taskId, toolCallId } : undefined;
+  }
+  if (result !== undefined || blocks[0].is_error === true) return undefined;
+  for (const [taskId, task] of session.liveBackgroundTasks) {
+    if (
+      task.parentToolUseId === toolCallId &&
+      task.taskType === "local_bash" &&
+      task.backgrounded
+    ) {
+      return { taskId, toolCallId };
+    }
+  }
+  return undefined;
 }
 
 /**
