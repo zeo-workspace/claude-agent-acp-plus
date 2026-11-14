@@ -375,8 +375,10 @@ export const REFUSAL_FALLBACK_DIALOG_KIND = "refusal_fallback_prompt";
  * transports payloads opaquely, so this shape is recovered from the CLI's own
  * schema (v2.1.177): `originalModel`/`fallbackModel` are required strings;
  * `apiRefusalCategory` (nullable), `guidanceText`, and
- * `retractedMessageUuids` are optional. We ignore `retractedMessageUuids` —
- * ACP has no way to retract already-streamed chunks.
+ * `retractedMessageUuids` are optional. We ignore `retractedMessageUuids` here —
+ * ACP has no way to retract already-streamed chunks. The tool calls of those
+ * messages are failed from the `model_refusal_fallback` notice instead (see
+ * `RetractedToolCalls`, upstream #1616).
  */
 export type RefusalFallbackPrompt = {
   originalModel: string;

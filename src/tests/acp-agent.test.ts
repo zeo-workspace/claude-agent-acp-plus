@@ -50,6 +50,7 @@ import {
   type SteerRequest,
   type StreamedToolInputCache,
 } from "../acp-agent.js";
+import { RETRACTED_TOOL_CALL_TEXT } from "../retracted-tool-calls.js";
 import { SessionTitles } from "../session-titles.js";
 import { Pushable } from "../utils.js";
 import {
@@ -6778,6 +6779,122 @@ describe("model refusal fallback handling", () => {
           u.content.text.includes("Background task declined."),
       ),
     ).toBe(false);
+  });
+
+  // Upstream #1616: Claude Code takes the response of a model that refuses
+  // back, stops its tool call without a result, and retries on the fallback
+  // model. Its notice, or the first message of the retry, names the message
+  // that it took back. Nothing else ends the call, so it span in the client.
+  it.each<[string, { notice: boolean; retry: boolean }]>([
+    ["the fallback notice", { notice: true, retry: false }],
+    ["the first message of the retry", { notice: false, retry: true }],
+    ["both", { notice: true, retry: true }],
+  ])(
+    "fails the tool call of a response that Claude Code took back, named by %s",
+    async (_name, names) => {
+      const { agent, sessionUpdate } = createCapturingAgent();
+      const assistant = (id: string, block: Record<string, unknown>) => ({
+        type: "assistant",
+        message: {
+          id,
+          type: "message",
+          role: "assistant",
+          model: "claude-fable-5",
+          content: [block],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+        parent_tool_use_id: null,
+        uuid: randomUUID(),
+        session_id: "test-session",
+      });
+      const refused = assistant("msg_refused", {
+        type: "tool_use",
+        id: "toolu_refused",
+        name: "Read",
+        input: { file_path: "/a.log" },
+      });
+      injectGeneratorSession(
+        agent,
+        makeGenerator([
+          refused,
+          refusalFallbackMessage(names.notice ? { retracted_message_uuids: [refused.uuid] } : {}),
+          {
+            ...assistant("msg_retry", { type: "text", text: "The logs are clean." }),
+            ...(names.retry && { supersedes: [refused.uuid] }),
+          },
+          successResult(),
+        ]),
+        modelStateOverrides,
+      );
+
+      const response = await agent.prompt({
+        sessionId: "test-session",
+        prompt: [{ type: "text", text: "test" }],
+      });
+      expect(response.stopReason).toBe("end_turn");
+
+      const updates = sessionUpdate.mock.calls.map((c: any[]) => (c[0] as { update: any }).update);
+      const closes = updates.filter(
+        (u) => u.toolCallId === "toolu_refused" && u.status === "failed",
+      );
+      expect(closes).toHaveLength(1);
+      expect(closes[0].content).toEqual([
+        {
+          type: "content",
+          content: { type: "text", text: RETRACTED_TOOL_CALL_TEXT },
+        },
+      ]);
+      // Before the retry's answer.
+      expect(updates.indexOf(closes[0])).toBeLessThan(
+        updates.findIndex((u) => u.content?.text === "The logs are clean."),
+      );
+    },
+  );
+
+  it("leaves a tool call of a retracted response alone once its result came", async () => {
+    const { agent, sessionUpdate } = createCapturingAgent();
+    const refusedUuid = randomUUID();
+    injectGeneratorSession(
+      agent,
+      makeGenerator([
+        {
+          type: "assistant",
+          message: {
+            id: "msg_refused",
+            type: "message",
+            role: "assistant",
+            model: "claude-fable-5",
+            content: [{ type: "tool_use", id: "toolu_done", name: "Read", input: {} }],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          },
+          parent_tool_use_id: null,
+          uuid: refusedUuid,
+          session_id: "test-session",
+        },
+        {
+          type: "user",
+          message: {
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "toolu_done", content: "ok" }],
+          },
+          parent_tool_use_id: null,
+          uuid: randomUUID(),
+          session_id: "test-session",
+        },
+        refusalFallbackMessage({ retracted_message_uuids: [refusedUuid] }),
+        successResult(),
+      ]),
+      modelStateOverrides,
+    );
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const updates = sessionUpdate.mock.calls.map((c: any[]) => (c[0] as { update: any }).update);
+    expect(updates.some((u) => u.toolCallId === "toolu_done" && u.status === "failed")).toBe(false);
   });
 });
 
