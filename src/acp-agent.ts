@@ -190,6 +190,15 @@ import {
   type RewindResult,
 } from "./session-rewind.js";
 import { parseCutAt, type TranscriptRow } from "./turn-cut.js";
+import {
+  CONTEXT_USAGE_CAPABILITY_KEY,
+  CONTEXT_USAGE_CAPABILITY_VERSION,
+  CONTEXT_USAGE_METHOD,
+  fetchContextReport,
+  parseContextUsageRequest,
+  type ContextUsageReport,
+  type ContextUsageRequest,
+} from "./context-usage.js";
 import { resolvePermissionMode, sessionAllowsBypass } from "./permissions/modes.js";
 import { normalizeDurablePermissionChangeSet } from "./permissions/normalization.js";
 import { buildClaudePermissionOptions } from "./permissions/options.js";
@@ -2511,6 +2520,7 @@ export class ClaudeAcpAgent {
           [USAGE_CAPABILITY_KEY]: { version: USAGE_CAPABILITY_VERSION },
           [BTW_CAPABILITY_KEY]: { version: BTW_CAPABILITY_VERSION },
           [REWIND_CAPABILITY_KEY]: { version: REWIND_CAPABILITY_VERSION },
+          [CONTEXT_USAGE_CAPABILITY_KEY]: { version: CONTEXT_USAGE_CAPABILITY_VERSION },
         },
         promptCapabilities: {
           image: true,
@@ -3207,6 +3217,39 @@ export class ClaudeAcpAgent {
     // A quota refresh is never a reason to keep the process alive.
     timer.unref?.();
     session.accountUsageTimer = timer;
+  }
+
+  /**
+   * `_claude/context/usage`: what fills this session's context window (see
+   * context-usage.ts), asked on a click, never per turn. On an idle session it
+   * asks for the full breakdown; while a turn is active or queued only for the
+   * local estimate, because the full one makes token-count calls and SDK
+   * control requests are serialized — an interrupt queued behind it would
+   * delay the Stop button (the same reason `_claude/usage/refresh` skips
+   * mid-turn). The answer says which it got.
+   */
+  async contextUsage(params: ContextUsageRequest): Promise<ContextUsageReport> {
+    const { sessionId } = params;
+    const log = (outcome: string) =>
+      this.logger.log(
+        `[context/usage] method=${CONTEXT_USAGE_METHOD} sessionId=${logValue(sessionId)} outcome=${outcome}`,
+      );
+    const session = Object.hasOwn(this.sessions, sessionId) ? this.sessions[sessionId] : undefined;
+    if (!session) {
+      log("error_unknown_session");
+      throw RequestError.invalidParams(undefined, `unknown session ${sessionId}`);
+    }
+    if (session.queryClosed) {
+      log("unavailable_session_ended");
+      return { status: "unavailable", message: SESSION_ENDED_MESSAGE };
+    }
+    if (session.queryRecreateInFlight) {
+      await session.queryRecreateInFlight;
+    }
+    const busy = Boolean(session.turnQueue?.length || session.activeTurn);
+    const report = await fetchContextReport(session.query, busy ? "summary" : "full");
+    log(report.status === "ok" ? `ok_${report.detail}` : report.status);
+    return report;
   }
 
   /** Transcript reads and copies for a cut at a turn (fork and rewind). */
@@ -12886,6 +12929,11 @@ export function runAcp(logger?: Logger) {
       USAGE_REFRESH_METHOD,
       { parse: parseUsageRefreshRequest },
       (ctx) => agent.refreshUsage(ctx.params),
+    )
+    .onRequest<ContextUsageRequest, ContextUsageReport>(
+      CONTEXT_USAGE_METHOD,
+      { parse: parseContextUsageRequest },
+      (ctx) => agent.contextUsage(ctx.params),
     )
     .onRequest<RewindRequest, RewindResult>(REWIND_METHOD, { parse: parseRewindRequest }, (ctx) =>
       agent.rewind(ctx.params),
