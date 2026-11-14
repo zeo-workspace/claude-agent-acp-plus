@@ -167,7 +167,8 @@ export class TaskFeed {
   private readonly tasks = new Map<string, TaskEntry>();
   /** Ended tasks whose final snapshot was sent successfully: never shown again. */
   private readonly published = new Set<string>();
-  /** Ambient task ids: never shown, and their later messages are not news. */
+  /** Ambient task ids that no tool call started: never shown, and their later
+   *  messages are not news. */
   private readonly ambient = new Set<string>();
   /** task id → its current life; bumped on every start. */
   private readonly lives = new Map<string, number>();
@@ -196,7 +197,13 @@ export class TaskFeed {
    * for a shell is the command text. Other task types keep the SDK's.
    */
   onStarted(msg: SDKTaskStartedMessage, toolDescription?: string): TaskChange {
-    if (msg.ambient) {
+    // Claude Code marks `ambient` its own housekeeping and every live-update
+    // watcher, "requested or auto-started" (SDK docs), so a Monitor the model
+    // called is ambient too. Upstream #1538's rule: a task a tool call started
+    // is work the operator can see and stop (`_claude/tasks/stop`), so it stays;
+    // only the ambient tasks Claude Code starts by itself, which name no tool
+    // call, are left out.
+    if (msg.ambient && !msg.tool_use_id) {
       this.ambient.add(msg.task_id);
       return "none";
     }
