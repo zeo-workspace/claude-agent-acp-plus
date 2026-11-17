@@ -656,6 +656,44 @@ describe("createSession options merging", () => {
     });
   });
 
+  describe("question routing (§6.43)", () => {
+    const formClient = { protocolVersion: 1, clientCapabilities: { elicitation: { form: {} } } };
+
+    it("appends the rule after the client's append when forms are supported", async () => {
+      const { QUESTION_ROUTING_PROMPT } = await import("../question-routing.js");
+      await agent.initialize(formClient);
+      await agent.newSession({
+        cwd: process.cwd(),
+        mcpServers: [],
+        _meta: { systemPrompt: { append: "extra instructions" } },
+      });
+
+      expect(capturedOptions!.systemPrompt).toEqual({
+        type: "preset",
+        preset: "claude_code",
+        append: `extra instructions\n\n${QUESTION_ROUTING_PROMPT}`,
+      });
+    });
+
+    it("leaves the preset alone when the session opts out", async () => {
+      await agent.initialize(formClient);
+      await agent.newSession({
+        cwd: process.cwd(),
+        mcpServers: [],
+        _meta: { askQuestionsInCards: false },
+      });
+
+      expect(capturedOptions!.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
+    });
+
+    it("leaves the preset alone without form elicitation", async () => {
+      await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+      await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
+
+      expect(capturedOptions!.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
+    });
+  });
+
   describe("elicitation", () => {
     it("keeps AskUserQuestion disabled and omits callbacks without elicitation capability", async () => {
       await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });

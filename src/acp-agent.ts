@@ -127,6 +127,7 @@ import {
   refusalFallbackToCreateRequest,
 } from "./elicitation.js";
 import { agentName } from "./agent-name.js";
+import { withQuestionRouting } from "./question-routing.js";
 import { filterDeprecatedModels } from "./model-deprecation.js";
 import { filterSupersededModels } from "./model-recency.js";
 import { SettingsManager } from "./settings.js";
@@ -9841,6 +9842,15 @@ export class ClaudeAcpAgent {
     // we render as a form elicitation. Without form-elicitation support there
     // is no way to present it over ACP, so keep it disabled in that case.
     const disallowedTools = elicitationSupport.form ? [] : ["AskUserQuestion"];
+
+    // §6.43: steer open questions into AskUserQuestion's card when the client
+    // can render it and has not opted out.
+    systemPrompt = withQuestionRouting(systemPrompt, {
+      formElicitation: elicitationSupport.form,
+      meta: params._meta,
+      userTools: userProvidedOptions?.tools,
+      userDisallowedTools: userProvidedOptions?.disallowedTools,
+    });
 
     // Resolve which built-in tools to expose.
     // Explicit tools array from _meta.claudeCode.options takes precedence.
