@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.38.0...v0.39.0) (2026-11-17)
+
+
+### Features
+
+* **prompt:** steer open questions into AskUserQuestion's card ([#227](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/227)) ([8163c20](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/8163c20974870e99f5e54f9c0a9178a3598c889d))
+
 ## [0.38.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.37.1...v0.38.0) (2026-11-14)
 
 
