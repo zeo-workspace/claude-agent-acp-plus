@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.39.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.39.0...v0.39.1) (2026-11-17)
+
+
+### Miscellaneous Chores
+
+* **deps:** bump @babel/runtime from 7.29.10 to 7.29.14 ([#224](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/224)) ([5618f4a](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/5618f4a6d8d0f759801d95af6d96e8a2b1e11f67))
+* **deps:** bump the actions group with 2 updates ([#225](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/225)) ([be128c8](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/be128c8e7f26ad7a9a055ad0c7e44f09fcf69adc))
+* **deps:** bump the minor group across 1 directory with 18 updates ([#226](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/226)) ([82dd75f](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/82dd75f1092b90442becfad5d0539c7a3c0f7f35))
+
 ## [0.39.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.38.0...v0.39.0) (2026-11-17)
 
 
