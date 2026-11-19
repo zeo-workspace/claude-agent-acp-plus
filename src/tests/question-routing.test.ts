@@ -3,6 +3,7 @@ import {
   ASK_QUESTIONS_IN_CARDS_META_KEY,
   QUESTION_ROUTING_PROMPT,
   questionRoutingEnabled,
+  questionRoutingResumeHook,
   withQuestionRouting,
   type QuestionRoutingInput,
 } from "../question-routing.js";
@@ -86,5 +87,34 @@ describe("withQuestionRouting", () => {
     // cannot call it at all; the rule is wrong if it stops saying either.
     expect(QUESTION_ROUTING_PROMPT).toMatch(/one to four questions/);
     expect(QUESTION_ROUTING_PROMPT).toMatch(/Subagents cannot ask the user/);
+  });
+});
+
+describe("questionRoutingResumeHook", () => {
+  // The CLI keeps a conversation's first system prompt (systemPromptSnapshot),
+  // so a resumed or forked session never sees a rule added to the preset later.
+  const signal = new AbortController().signal;
+  const prompt = { hook_event_name: "UserPromptSubmit", prompt: "hi" } as never;
+
+  it("carries the rule in on the first prompt only", async () => {
+    const hook = questionRoutingResumeHook();
+    expect(await hook(prompt, undefined, { signal })).toEqual({
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: "UserPromptSubmit",
+        additionalContext: QUESTION_ROUTING_PROMPT,
+      },
+    });
+    expect(await hook(prompt, undefined, { signal })).toEqual({ continue: true });
+    expect(await hook(prompt, undefined, { signal })).toEqual({ continue: true });
+  });
+
+  it("keeps one delivery per hook, so each resumed session gets its own", async () => {
+    const first = questionRoutingResumeHook();
+    await first(prompt, undefined, { signal });
+    const second = questionRoutingResumeHook();
+    expect(await second(prompt, undefined, { signal })).toMatchObject({
+      hookSpecificOutput: { additionalContext: QUESTION_ROUTING_PROMPT },
+    });
   });
 });

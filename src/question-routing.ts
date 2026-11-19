@@ -21,7 +21,7 @@
  * coupling to it is paid again at each sync.
  */
 
-import type { Options } from "@anthropic-ai/claude-agent-sdk";
+import type { HookCallback, Options } from "@anthropic-ai/claude-agent-sdk";
 
 /** Session `_meta` key; `false` turns the rule off (Zeo's
  *  `agent.ask_questions_in_cards`). Absent or any other value leaves it on. */
@@ -84,5 +84,30 @@ export function withQuestionRouting(
   return {
     ...systemPrompt,
     append: existing ? `${existing}\n\n${QUESTION_ROUTING_PROMPT}` : QUESTION_ROUTING_PROMPT,
+  };
+}
+
+/** A `UserPromptSubmit` hook for a resumed, loaded or forked session: it
+ *  carries the rule in as additional context on the session's first prompt,
+ *  then stays silent. Such a session keeps the system prompt recorded when the
+ *  conversation began, so `withQuestionRouting` cannot reach it. `SessionStart`
+ *  would be the natural event, but the CLI fires it before the SDK's callback
+ *  hooks are registered: measured 2026-11-19 over ACP stdio, a `SessionStart`
+ *  callback was registered and never called on `session/load`. Register this
+ *  only where `withQuestionRouting` applied the rule. A session that already
+ *  began with the rule gets it once more; the adapter cannot read the recorded
+ *  prompt to tell. */
+export function questionRoutingResumeHook(): HookCallback {
+  let delivered = false;
+  return async () => {
+    if (delivered) return { continue: true };
+    delivered = true;
+    return {
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: "UserPromptSubmit",
+        additionalContext: QUESTION_ROUTING_PROMPT,
+      },
+    };
   };
 }
