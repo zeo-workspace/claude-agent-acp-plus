@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.2](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.39.1...v0.39.2) (2026-11-20)
+
+
+### Bug Fixes
+
+* **prompt:** carry the question-routing rule into resumed sessions ([#232](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/232)) ([10a7019](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/10a70198e7d599e6007c9738a14977c5ebd08c3f))
+
 ## [0.39.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.39.0...v0.39.1) (2026-11-17)
 
 
