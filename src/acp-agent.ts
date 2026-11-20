@@ -127,7 +127,7 @@ import {
   refusalFallbackToCreateRequest,
 } from "./elicitation.js";
 import { agentName } from "./agent-name.js";
-import { withQuestionRouting } from "./question-routing.js";
+import { questionRoutingResumeHook, withQuestionRouting } from "./question-routing.js";
 import { filterDeprecatedModels } from "./model-deprecation.js";
 import { filterSupersededModels } from "./model-recency.js";
 import { SettingsManager } from "./settings.js";
@@ -9845,12 +9845,17 @@ export class ClaudeAcpAgent {
 
     // §6.43: steer open questions into AskUserQuestion's card when the client
     // can render it and has not opted out.
+    const presetBeforeQuestionRouting = systemPrompt;
     systemPrompt = withQuestionRouting(systemPrompt, {
       formElicitation: elicitationSupport.form,
       meta: params._meta,
       userTools: userProvidedOptions?.tools,
       userDisallowedTools: userProvidedOptions?.disallowedTools,
     });
+    // A resumed, loaded or forked conversation keeps its first prompt, so the
+    // rule reaches it only through a prompt hook (see question-routing.ts).
+    const questionRoutingOnResume =
+      systemPrompt !== presetBeforeQuestionRouting && creationOpts.resume !== undefined;
 
     // Resolve which built-in tools to expose.
     // Explicit tools array from _meta.claudeCode.options takes precedence.
@@ -10140,6 +10145,14 @@ export class ClaudeAcpAgent {
                     },
                   ],
                 },
+              ],
+            }
+          : {}),
+        ...(questionRoutingOnResume
+          ? {
+              UserPromptSubmit: [
+                ...(userProvidedOptions?.hooks?.UserPromptSubmit || []),
+                { hooks: [questionRoutingResumeHook()] },
               ],
             }
           : {}),
