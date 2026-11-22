@@ -30,7 +30,8 @@
         },
         "mcpCapabilities": {
           "http": true,
-          "sse": true
+          "sse": true,
+          "acp": true
         },
         "auth": {
           "logout": {}
@@ -98,7 +99,8 @@
         },
         "mcpCapabilities": {
           "http": true,
-          "sse": true
+          "sse": true,
+          "acp": true
         },
         "auth": {
           "logout": {}
@@ -181,7 +183,8 @@
         },
         "mcpCapabilities": {
           "http": true,
-          "sse": true
+          "sse": true,
+          "acp": true
         },
         "auth": {
           "logout": {}
@@ -278,7 +281,8 @@
         },
         "mcpCapabilities": {
           "http": true,
-          "sse": true
+          "sse": true,
+          "acp": true
         },
         "auth": {
           "logout": {}
@@ -367,7 +371,8 @@
         },
         "mcpCapabilities": {
           "http": true,
-          "sse": true
+          "sse": true,
+          "acp": true
         },
         "auth": {
           "logout": {}
@@ -464,7 +469,8 @@
         },
         "mcpCapabilities": {
           "http": true,
-          "sse": true
+          "sse": true,
+          "acp": true
         },
         "auth": {
           "logout": {}
@@ -547,7 +553,8 @@
         },
         "mcpCapabilities": {
           "http": true,
-          "sse": true
+          "sse": true,
+          "acp": true
         },
         "auth": {
           "logout": {}
