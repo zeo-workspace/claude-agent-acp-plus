@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.39.2...v0.40.0) (2026-11-22)
+
+
+### Features
+
+* **mcp:** serve client MCP servers over ACP, and log every dropped server ([#235](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/235)) ([f31f7b4](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/f31f7b49ed5b758806e474daa0dd1ba66f562ca7))
+
 ## [0.39.2](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.39.1...v0.39.2) (2026-11-20)
 
 
