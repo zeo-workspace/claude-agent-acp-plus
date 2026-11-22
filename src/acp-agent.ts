@@ -53,6 +53,7 @@ import {
   WriteTextFileRequest,
   WriteTextFileResponse,
   StopReason,
+  McpOverAcpCaller,
 } from "@agentclientprotocol/sdk/unstable";
 import {
   AgentInfo,
@@ -234,6 +235,8 @@ import {
   isFileChangeAuditTool,
   supportsAgentFileChangeReport,
 } from "./file-change-audit.js";
+import { logDroppedClientMcpServers, mapClientMcpServers } from "./client-mcp-servers.js";
+import type { McpOverAcpRequest } from "./mcp-over-acp.js";
 import {
   clientSupportsNotices,
   collapseHookSpeaker,
@@ -2229,6 +2232,10 @@ export interface AcpClient {
   unstable_completeElicitation(params: CompleteElicitationNotification): Promise<void>;
   /** Send a custom (extension) notification, e.g. `_claude/sdkMessage`. */
   extNotification(method: string, params: Record<string, unknown>): Promise<void>;
+  /** MCP-over-ACP: one MCP request to a server the client declared with
+   *  `type: "acp"`. Optional — a client without it gets `mcpCapabilities.acp`
+   *  unadvertised and its `acp` entries are dropped with a log line. */
+  requestMcp?: McpOverAcpRequest;
 }
 
 /**
@@ -2238,7 +2245,17 @@ export interface AcpClient {
  * construction.
  */
 class ClientConnection implements AcpClient {
-  constructor(private readonly ctx: AgentContext) {}
+  constructor(
+    private readonly ctx: AgentContext,
+    private readonly mcpCaller?: McpOverAcpCaller,
+  ) {}
+
+  requestMcp: McpOverAcpRequest = (serverId, method, params, options) => {
+    if (!this.mcpCaller) {
+      return Promise.reject(new Error("MCP-over-ACP is not wired on this connection"));
+    }
+    return this.mcpCaller.request(this.ctx, serverId, method, params, options);
+  };
 
   sessionUpdate(params: SessionNotification): Promise<void> {
     return this.ctx.notify(methods.client.session.update, params);
@@ -2530,6 +2547,9 @@ export class ClaudeAcpAgent {
         mcpCapabilities: {
           http: true,
           sse: true,
+          // MCP-over-ACP (unstable in ACP schema 1.19): only when this
+          // connection can send `mcp/message` back to the client.
+          ...(this.client.requestMcp ? { acp: true } : {}),
         },
         auth: {
           logout: {},
@@ -9750,31 +9770,22 @@ export class ClaudeAcpAgent {
     });
     await settingsManager.initialize();
 
-    const mcpServers: Record<string, McpServerConfig> = {};
-    if (Array.isArray(params.mcpServers)) {
-      for (const server of params.mcpServers) {
-        if ("type" in server && (server.type === "http" || server.type === "sse")) {
-          // HTTP or SSE type MCP server
-          mcpServers[server.name] = {
-            type: server.type,
-            url: server.url,
-            headers: server.headers
-              ? Object.fromEntries(server.headers.map((e) => [e.name, e.value]))
-              : undefined,
-          };
-        } else if (!("type" in server)) {
-          // Stdio type MCP server (with or without explicit type field)
-          mcpServers[server.name] = {
-            type: "stdio",
-            command: server.command,
-            args: server.args,
-            env: server.env
-              ? Object.fromEntries(server.env.map((e) => [e.name, e.value]))
-              : undefined,
-          };
-        }
-      }
-    }
+    // Every entry the SDK cannot take is logged, never dropped silently
+    // (§6.69 step 1). `acp` entries ride this connection back to the client
+    // (MCP-over-ACP, §6.69 step 3 / §6.13). The internal file-change-audit
+    // server's name is reserved only when that server is registered below.
+    const clientMcp = mapClientMcpServers(params.mcpServers, {
+      sessionId,
+      requestMcp: this.client.requestMcp?.bind(this.client),
+      reservedNames: new Set(
+        supportsAgentFileChangeReport(this.clientCapabilities)
+          ? [FILE_CHANGE_AUDIT_SERVER_NAME]
+          : [],
+      ),
+      logger: this.logger,
+    });
+    logDroppedClientMcpServers(this.logger, sessionId, clientMcp.dropped);
+    const mcpServers: Record<string, McpServerConfig> = clientMcp.servers;
 
     let systemPrompt: Options["systemPrompt"] = { type: "preset", preset: "claude_code" };
     if (params._meta?.systemPrompt) {
@@ -12908,6 +12919,12 @@ export function runAcp(logger?: Logger) {
   // not exist until `connect()` has been called.
   // eslint-disable-next-line prefer-const
   let agent: ClaudeAcpAgent;
+  // One caller per connection: it owns the MCP-over-ACP request ids, and the
+  // `mcp/message` notifications below (progress) are routed to the request
+  // that owns them.
+  const mcpCaller = new McpOverAcpCaller({
+    clientInfo: { name: agentName, version: packageJson.version },
+  });
   const connection = acpAgent({ name: agentName })
     .onRequest(methods.agent.initialize, (ctx) => agent.initialize(ctx.params))
     .onRequest(methods.agent.session.new, (ctx) => agent.newSession(ctx.params))
@@ -12930,6 +12947,7 @@ export function runAcp(logger?: Logger) {
       runPromptWithCancellation(agent, ctx.params, ctx.signal),
     )
     .onNotification(methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params))
+    .onNotification(methods.agent.mcp.message, mcpCaller.handleNotification)
     .onRequest<SteerRequest, SteerResponse>(STEER_METHOD, { parse: parseSteerRequest }, (ctx) =>
       agent.steer(ctx.params),
     )
@@ -12973,7 +12991,7 @@ export function runAcp(logger?: Logger) {
     )
     .connect(stream);
 
-  agent = new ClaudeAcpAgent(new ClientConnection(connection.client), logger);
+  agent = new ClaudeAcpAgent(new ClientConnection(connection.client, mcpCaller), logger);
   return { connection, agent };
 }
 
