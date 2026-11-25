@@ -74,19 +74,19 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "1.7.0",
+    "@anthropic-ai/sdk": "1.10.0",
     "@eslint/js": "10.0.1",
-    "@tsconfig/node24": "24.0.5",
+    "@tsconfig/node24": "24.0.6",
     "@types/node": "26.6.6",
-    "@typescript-eslint/eslint-plugin": "8.72.2",
-    "@typescript-eslint/parser": "8.72.2",
-    "eslint": "10.14.0",
+    "@typescript-eslint/eslint-plugin": "8.73.0",
+    "@typescript-eslint/parser": "8.73.0",
+    "eslint": "10.15.0",
     "eslint-config-prettier": "10.1.8",
     "globals": "17.14.0",
-    "prettier": "3.9.10",
+    "prettier": "3.10.1",
     "ts-node": "10.9.2",
     "typescript": "6.0.3",
-    "vitest": "5.1.0"
+    "vitest": "5.1.1"
   },
   "overrides": {
     "minimatch": "11.0.1"
