@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.40.0...v0.40.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **security:** MCP servers and settings over stdin; agent SDK 0.3.331, ACP SDK 2.12.0 ([#240](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/240)) ([f492ef7](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/f492ef729fbd7f3dbe34ba81d26f24d1c94dac0a))
+
 ## [0.40.0](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.39.2...v0.40.0) (2026-11-22)
 
 
