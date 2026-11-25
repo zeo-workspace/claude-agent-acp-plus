@@ -2743,6 +2743,77 @@ describe("permission request cancellation", () => {
     return agent.sessions[sessionId]!;
   }
 
+  // Upstream #1644: Claude Code's own question (`confirm_<uuid>`) has no tool_result, so its
+  // answer settles the tool call; a model's AskUserQuestion is left to its tool_result.
+  describe("a question Claude Code asks on its own", () => {
+    function setup(action: "accept" | "decline") {
+      const updates: any[] = [];
+      const mockClient = {
+        sessionUpdate: async (n: any) => {
+          updates.push(n.update);
+        },
+        unstable_createElicitation: async (params: any) => {
+          if (action === "decline") return { action: "decline" };
+          const key = Object.keys(params.requestedSchema.properties ?? {}).find(
+            (k) => k !== "customAnswer",
+          )!;
+          const prop = params.requestedSchema.properties[key];
+          return { action: "accept", content: { [key]: prop.oneOf[0].const } };
+        },
+      } as unknown as AcpClient;
+      const agent = new ClaudeAcpAgent(mockClient, { log: () => {}, error: () => {} });
+      (agent as any).clientCapabilities = { elicitation: { form: {} } };
+      const session = injectSession(agent, "session-1");
+      const ask = (toolUseID: string) =>
+        agent.canUseTool("session-1")(
+          "AskUserQuestion",
+          {
+            questions: [
+              {
+                question: "Download the connector's file?",
+                header: "Download",
+                multiSelect: false,
+                options: [
+                  { label: "Yes", description: "y" },
+                  { label: "No", description: "n" },
+                ],
+              },
+            ],
+          },
+          { signal: new AbortController().signal, suggestions: [], toolUseID } as any,
+        );
+      return { session, updates, ask };
+    }
+
+    const settles = (updates: any[], id: string) =>
+      updates.filter((u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === id);
+
+    it("settles its tool call completed once answered", async () => {
+      const { session, updates, ask } = setup("accept");
+      const result = await ask("confirm_abc");
+      expect(result?.behavior).toBe("allow");
+      expect(settles(updates, "confirm_abc")).toEqual([
+        expect.objectContaining({ status: "completed" }),
+      ]);
+      expect(session.emittedToolCalls.has("confirm_abc")).toBe(false);
+    });
+
+    it("settles it when the form is declined too (an answer with nothing selected)", async () => {
+      const { updates, ask } = setup("decline");
+      await ask("confirm_def");
+      expect(settles(updates, "confirm_def")).toEqual([
+        expect.objectContaining({ status: "completed" }),
+      ]);
+    });
+
+    it("leaves a model's AskUserQuestion to its tool_result", async () => {
+      const { session, updates, ask } = setup("accept");
+      await ask("toolu_model");
+      expect(settles(updates, "toolu_model")).toEqual([]);
+      expect(session.emittedToolCalls.has("toolu_model")).toBe(true);
+    });
+  });
+
   // Upstream #1466: a cancelled outcome denies background work instead of aborting it.
   describe("a cancelled outcome", () => {
     function setup() {
@@ -15519,6 +15590,64 @@ describe("turn steering (_session/steering)", () => {
     expect(agent.sessions["test-session"].owedTrailingIdles).toBe(0);
   });
 
+  // Upstream #1451. The same guard when the autonomous cycle's result is stamped with the
+  // original prompt: answersPendingPrompt then routes it to the user lane, and
+  // its idle must still not settle the turn while the steered work runs.
+  it.each(["end_turn", "refusal"] as const)(
+    "does not settle a steered turn on an autonomous %s result naming the original prompt",
+    async (stopReason) => {
+      const timeline: string[] = [];
+      const agent = new ClaudeAcpAgent(timelineClient(timeline), {
+        log: () => {},
+        error: () => {},
+      });
+
+      injectGeneratorSession(agent, (input) => {
+        async function* messageGenerator() {
+          const iter = input[Symbol.asyncIterator]();
+          const u1 = await iter.next();
+          yield userEcho(u1.value);
+          yield createAssistantText("working on it");
+          const steered = await iter.next();
+          yield { ...interruptedCycleResult(), user_message_uuid: u1.value.uuid };
+          yield userEcho(steered.value);
+          // A background cycle's result, stamped with the original prompt only.
+          yield {
+            ...createResultMessage(),
+            stop_reason: stopReason,
+            origin: { kind: "task-notification" },
+            user_message_uuid: u1.value.uuid,
+            user_message_uuids: [u1.value.uuid],
+          };
+          yield idleMessage(); // that cycle's trailer
+          yield createAssistantText("STEERED-OK");
+          yield createResultMessage();
+          yield idleMessage();
+        }
+        return messageGenerator();
+      });
+
+      const turn = agent
+        .prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "start" }] })
+        .then((response) => {
+          timeline.push(`prompt:${response.stopReason}`);
+          return response;
+        });
+      await waitFor(() => !!agent.sessions["test-session"]?.activeTurn);
+      await agent.steer({
+        sessionId: "test-session",
+        prompt: [{ type: "text", text: "also handle X" }],
+      });
+
+      await turn;
+      await agent.sessions["test-session"]?.consumer;
+
+      // The turn keeps one stop reason across its cycles, so a refusal trailer's
+      // reason is reported; what matters here is that the prompt ends last.
+      expect(timeline).toEqual(["working on it", "STEERED-OK", `prompt:${stopReason}`]);
+    },
+  );
+
   it("always injects at 'now' priority, ignoring any client-supplied priority", async () => {
     const agent = createMockAgent();
     const captured: any[] = [];
@@ -16402,7 +16531,7 @@ describe("streamEventToAcpNotifications", () => {
         name: "mcp__demo__search",
         type: "mcp_tool_use" as const,
         partialJson: '{"query":"custom MCP query","options":',
-        title: "mcp__demo__search",
+        title: "demo: search",
         rawInput: { query: "custom MCP query" },
       },
     ])("refines $case before the full JSON object completes", (testCase) => {

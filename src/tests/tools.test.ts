@@ -3732,3 +3732,25 @@ describe("toolInfoFromToolUse - fork subagent title", () => {
     expect(info.title).toBe("Explore (high effort)");
   });
 });
+
+describe("toolInfoFromToolUse - MCP titles (#1674)", () => {
+  it("titles an MCP call `server: tool`", () => {
+    const info = toolInfoFromToolUse(
+      { name: "mcp__github__create_issue", id: "t1", input: {} },
+      false,
+    );
+    expect(info.title).toBe("github: create_issue");
+  });
+
+  it("keeps a `__` inside the tool part and leaves incomplete names alone", () => {
+    expect(toolInfoFromToolUse({ name: "mcp__s__a__b", id: "t2", input: {} }, false).title).toBe(
+      "s: a__b",
+    );
+    expect(toolInfoFromToolUse({ name: "mcp__onlyserver", id: "t3", input: {} }, false).title).toBe(
+      "mcp__onlyserver",
+    );
+    expect(toolInfoFromToolUse({ name: "mcp____x", id: "t4", input: {} }, false).title).toBe(
+      "mcp____x",
+    );
+  });
+});

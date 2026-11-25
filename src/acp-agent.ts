@@ -97,6 +97,12 @@ import {
   parseGoalRequest,
   toGoalSnapshot,
 } from "./goal-extension.js";
+import { cliDelivery } from "./cli-delivery.js";
+import {
+  clientMcpServerNames,
+  refusedMcpServersNotice,
+  withoutClientMcpServers,
+} from "./refused-mcp-servers.js";
 import { sanitizeTitle, SessionTitles } from "./session-titles.js";
 import {
   readResumedPermissionMode,
@@ -126,6 +132,7 @@ import {
   REFUSAL_FALLBACK_DIALOG_KIND,
   refusalFallbackResultFromResponse,
   refusalFallbackToCreateRequest,
+  isConfirmQuestion,
 } from "./elicitation.js";
 import { agentName } from "./agent-name.js";
 import { questionRoutingResumeHook, withQuestionRouting } from "./question-routing.js";
@@ -305,7 +312,11 @@ import {
   structuredUsageMarkdown,
   syntheticLocalCommand,
 } from "./usage-markdown.js";
-import { STARTUP_FAILURE_RESULTS_ENV, startupFailureError } from "./startup-failure.js";
+import {
+  STARTUP_FAILURE_RESULTS_ENV,
+  startupFailureError,
+  startupFailureReasonOf,
+} from "./startup-failure.js";
 
 export { DEFAULT_AGENT_ID, EFFORT_CONFIG_ID } from "./session-config-ids.js";
 import { MODE_CONFIG_ID, SessionModeManager } from "./session-mode.js";
@@ -968,6 +979,9 @@ export type Session = {
    *  needing authentication. `system`/init re-emits on every turn with the
    *  same statuses, and each server is reported once per session. */
   reportedMcpServers?: Set<string>;
+  /** Client MCP servers this session started without because Claude Code refused to start
+   *  with them (`sideload_flags_disabled`, upstream #1708); reported in one notice. */
+  refusedMcpServers?: string[];
   /** The long-lived consumer task. Lazily started on the first `prompt()` and
    *  kept alive for the session so between-turn/background messages are still
    *  drained and forwarded. */
@@ -1058,6 +1072,10 @@ export type Session = {
    *  reports on `system`/init and user-turn `result`s; surfaced in the Fast mode
    *  option's description so a toggle that snaps back off explains itself. */
   fastModeDisabledReason?: FastModeDisabledReason;
+  /** The Fast mode report of the last `system`/init, until a user-turn result takes it: a
+   *  result that repeats it predates a toggle sent mid-turn and is not mirrored (upstream
+   *  #1637, {@link fastModeResultIsNews}). */
+  fastModeInitReport?: FastModeReport;
   /** Tri-state Thinking intent (story 006): `true`/`false` once the client has
    *  set the Thinking config option, `undefined` while untouched — i.e. the
    *  env-driven `MAX_THINKING_TOKENS` behavior stays in charge (R1.6). Mirrors
@@ -1542,6 +1560,16 @@ export type SDKMessageFilter = {
 /**
  * Extra metadata that can be given when creating a new session.
  */
+/** How `ClaudeAcpAgent.createSession` creates a session. */
+type SessionCreationOpts = {
+  resume?: string;
+  forkSession?: boolean;
+  publicSessionId?: string;
+  /** Start a fresh query (no `resume`) under this existing session id. */
+  reuseSessionId?: string;
+  permissionMode?: PermissionMode;
+};
+
 export type NewSessionMeta = {
   claudeCode?: {
     /**
@@ -2608,6 +2636,15 @@ export class ClaudeAcpAgent {
   }
 
   async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
+    // Session cursors RFD (ACP schema 1.33, upstream #1655): an agent must reject a cursor it did
+    // not issue with -32602 and must not fork the whole session in its place. Plus sends no
+    // `cursor_update`, so every cursor is one it did not issue.
+    if (params.cursorId != null) {
+      throw RequestError.invalidParams(
+        { cursorId: params.cursorId },
+        `session/fork: unknown cursorId ${JSON.stringify(params.cursorId)}; this agent issues no session cursors`,
+      );
+    }
     if (this.providerUpdate) await this.providerUpdate;
     // A cut point under `_meta["_claude/forkAt"]` forks from that turn (§6.33);
     // without one the fork copies the whole session, as before.
@@ -3442,6 +3479,25 @@ export class ClaudeAcpAgent {
     sendUpdate: (notification: SessionNotification) => Promise<void>,
     sessionId: string,
   ): Promise<void> {
+    const refused = session.refusedMcpServers?.filter((n) => !session.reportedMcpServers?.has(n));
+    if (refused?.length) {
+      for (const name of refused) (session.reportedMcpServers ??= new Set()).add(name);
+      await sendUpdate({
+        sessionId,
+        update: noticeOrTranscriptUpdate(
+          refusedMcpServersNotice(refused),
+          supportsNotices,
+          undefined,
+          {
+            claudeCode: {
+              kind: "mcpServerStatus",
+              ...(refused.length === 1 ? { server: refused[0] } : { servers: refused }),
+              status: "failed",
+            },
+          },
+        ),
+      });
+    }
     if (!servers?.length) return;
     const clientServers = new Set(
       (session.creationParams?.mcpServers ?? []).map((server) => server.name),
@@ -4549,14 +4605,19 @@ export class ClaudeAcpAgent {
      *  turn that can have spawned subagents must route through here: a site
      *  calling settleActive directly bypasses the hold and re-opens the
      *  out-of-turn permission deadlock (issue #866) through its lane. */
-    const settleOrDefer = (outcome: PromptResponse) => {
+    const settleOrDefer = (
+      outcome: PromptResponse,
+      { steeredWork = true }: { steeredWork?: boolean } = {},
+    ) => {
       // No result ends a steered turn: the steer aborted the cycle this result
       // may belong to, and the steered one is still to come. Record the outcome
       // for the idle lane (see Turn.steeredEchoes); later cycles overwrite it,
       // so the last result and its usage win.
       if (isSteering(session.activeTurn)) {
         session.activeTurn.steeredSettle = outcome;
-        session.activeTurn.steeredAwaitingResult = false;
+        // Upstream #1451: only a result of the steered work ends the wait for it. A result
+        // of a cycle Claude Code started that names none of the steers is not that result.
+        if (steeredWork) session.activeTurn.steeredAwaitingResult = false;
         return;
       }
       if (
@@ -5028,6 +5089,10 @@ export class ClaudeAcpAgent {
                 // A fresh `system`/init (e.g. after reinitialize) can carry an
                 // updated Fast mode state; reconcile it with what we seeded at
                 // session creation.
+                session.fastModeInitReport = {
+                  state: message.fast_mode_state,
+                  reason: message.fast_mode_disabled_reason,
+                };
                 await this.syncFastModeState(
                   params.sessionId,
                   session,
@@ -5938,13 +6003,24 @@ export class ClaudeAcpAgent {
               // Gated to user-driven turns like every other side effect below;
               // an autonomous cycle's state lands on the next user turn's
               // result. Runs even when the turn errors or was cancelled.
+              // Upstream #1637: Claude Code reads the flag once per turn and builds the turn's
+              // init and result from that one reading, so a result that repeats its init
+              // predates a toggle sent mid-turn; mirroring it would flip the toggle back.
               if (!isAutonomousResult) {
-                await this.syncFastModeState(
-                  params.sessionId,
-                  session,
-                  message.fast_mode_state,
-                  message.fast_mode_disabled_reason,
-                );
+                const fastModeInitReport = session.fastModeInitReport;
+                session.fastModeInitReport = undefined;
+                const fastModeReport = {
+                  state: message.fast_mode_state,
+                  reason: message.fast_mode_disabled_reason,
+                };
+                if (fastModeResultIsNews(fastModeInitReport, fastModeReport)) {
+                  await this.syncFastModeState(
+                    params.sessionId,
+                    session,
+                    message.fast_mode_state,
+                    message.fast_mode_disabled_reason,
+                  );
+                }
               }
 
               // A user-turn result needs an active turn so its stop reason is
@@ -5956,6 +6032,10 @@ export class ClaudeAcpAgent {
               // commands whose shared or late result this is, even when the
               // result is the ACTIVE turn's (ensureActiveTurn never looks at
               // the map in that case).
+              // Whether this result names one of the turn's steers (upstream #1451). The
+              // settle calls below read it too: a result of a cycle Claude Code started that
+              // names none of them is not the steered work's result.
+              let answersSteer = false;
               if (!isAutonomousResult) {
                 recordResultForOrphanCommands();
                 ensureActiveTurn(message.user_message_uuid);
@@ -5973,7 +6053,6 @@ export class ClaudeAcpAgent {
                   const consumed =
                     message.user_message_uuids ??
                     (message.user_message_uuid !== undefined ? [message.user_message_uuid] : []);
-                  let answersSteer = false;
                   for (const uuid of consumed) {
                     steeredTurn.steeredEchoes.delete(uuid);
                     if (steeredTurn.steeredUuids?.has(uuid)) answersSteer = true;
@@ -6294,7 +6373,10 @@ export class ClaudeAcpAgent {
                 // settling it out from under them would strand their output
                 // and permission requests out-of-turn (issue #866's deadlock,
                 // through the refusal lane).
-                settleOrDefer({ stopReason: "refusal", usage: sessionUsage(session) });
+                settleOrDefer(
+                  { stopReason: "refusal", usage: sessionUsage(session) },
+                  { steeredWork: !startedByClaudeCode || answersSteer },
+                );
                 break;
               }
 
@@ -6487,7 +6569,10 @@ export class ClaudeAcpAgent {
               // idle/abort path. settleActive is idempotent, so a duplicate
               // idle is a no-op.
               if (!session.cancelled) {
-                settleOrDefer({ stopReason, usage: sessionUsage(session) });
+                settleOrDefer(
+                  { stopReason, usage: sessionUsage(session) },
+                  { steeredWork: !startedByClaudeCode || answersSteer },
+                );
               }
             } finally {
               if (!isAutonomousResult) {
@@ -8439,6 +8524,30 @@ export class ClaudeAcpAgent {
     }
   }
 
+  /** Settle the tool call `ensureToolCallEmitted` emitted for a question Claude Code asked on
+   *  its own (see `isConfirmQuestion`), once it is answered. Forgotten first, so a later cancel,
+   *  which ends every tool call still recorded as emitted, does not end it a second time. */
+  private async settleConfirmQuestionCall(
+    sessionId: string,
+    toolCallId: string,
+    answered: boolean,
+  ): Promise<void> {
+    const session = this.sessions[sessionId];
+    if (!session || !session.emittedToolCalls.delete(toolCallId)) return;
+    try {
+      await this.client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: answered ? "completed" : "failed",
+        },
+      });
+    } catch (error) {
+      this.logger.error(`Failed to settle the tool call ${toolCallId}:`, error);
+    }
+  }
+
   canUseTool(sessionId: string): CanUseTool {
     return async (
       toolName,
@@ -8523,13 +8632,25 @@ export class ClaudeAcpAgent {
           parentToolUseId,
           signal,
         );
-        return this.handleAskUserQuestion(
+        const answer = this.handleAskUserQuestion(
           sessionId,
           toolInput,
           toolUseID,
           signal,
           this.childSessions?.childFor(sessionId, parentToolUseId),
         );
+        if (!isConfirmQuestion(toolUseID)) return answer;
+        // Upstream #1644: no tool_result ends the tool call of Claude Code's own question, so
+        // its answer does (a declined form too). A request Claude Code withdrew has no answer;
+        // a cancel ends the open tool calls of the work it stops.
+        let answered = false;
+        try {
+          const result = await answer;
+          answered = result.behavior === "allow";
+          return result;
+        } finally {
+          if (!signal.aborted) await this.settleConfirmQuestionCall(sessionId, toolUseID, answered);
+        }
       }
 
       // Do not auto-allow here based on the session's advertised mode. Claude
@@ -9138,8 +9259,9 @@ export class ClaudeAcpAgent {
    *  option is guaranteed to be present in `configOptions`. */
   private async applyFastMode(session: Session, enabled: boolean): Promise<void> {
     // Apply the SDK flag first so a rejected control request leaves both the
-    // session state and the config option untouched (no UI/SDK desync).
-    await session.query.applyFlagSettings({ fastMode: enabled });
+    // session state and the config option untouched (no UI/SDK desync); see
+    // `applyFastModeFlag` for the reset that makes a repeated "on" take effect.
+    await applyFastModeFlag((settings) => session.query.applyFlagSettings(settings), enabled);
     session.fastModeEnabled = enabled;
     this.refreshFastModeOption(session, enabled);
   }
@@ -9730,16 +9852,42 @@ export class ClaudeAcpAgent {
     }
   }
 
+  /**
+   * Creates the session. Upstream #1708: under a managed `disableSideloadFlags`, Claude Code
+   * takes MCP servers only from sources the administrator approved and refuses a start that
+   * brings others (`sideload_flags_disabled`, SDK 0.3.331). Zed sends its MCP servers with every
+   * session, so on such a machine every `session/new` failed with -32603. The session now starts
+   * once more without them, and they are reported in one notice. Claude Code decides at every
+   * start: the original params stay the session's `creationParams`, so a later start tries the
+   * servers again. A second refusal (e.g. over the client's plugins) is thrown as before.
+   */
   private async createSession(
     params: NewSessionRequest,
-    creationOpts: {
-      resume?: string;
-      forkSession?: boolean;
-      publicSessionId?: string;
-      /** Start a fresh query (no `resume`) under this existing session id. */
-      reuseSessionId?: string;
-      permissionMode?: PermissionMode;
-    } = {},
+    creationOpts: SessionCreationOpts = {},
+  ): Promise<NewSessionResponse> {
+    const names = clientMcpServerNames(params);
+    try {
+      return await this.startSession(params, creationOpts);
+    } catch (error) {
+      if (!names.length || startupFailureReasonOf(error) !== "sideload_flags_disabled") throw error;
+      this.logger.error(
+        `[session/new] Claude Code refused the client MCP servers (sideload_flags_disabled); ` +
+          `starting without ${names.length}: ${names.join(", ")}`,
+      );
+      const response = await this.startSession(withoutClientMcpServers(params), creationOpts);
+      const session = this.sessions[response.sessionId];
+      if (session) {
+        session.creationParams = params;
+        session.refusedMcpServers = names;
+      }
+      return response;
+    }
+  }
+
+  /** One start of {@link createSession}. */
+  private async startSession(
+    params: NewSessionRequest,
+    creationOpts: SessionCreationOpts = {},
   ): Promise<NewSessionResponse> {
     // Validate `cwd` up front. The ACP spec requires an absolute path, and the
     // directory must actually exist on the machine running the agent. Without
@@ -10053,6 +10201,9 @@ export class ClaudeAcpAgent {
       // (story 012, R3), opt-in because each costs tokens. Before the user
       // spread, so an explicit `agentProgressSummaries` still wins.
       agentProgressSummaries: progressSummariesEnabled(),
+      // MCP servers and settings over stdin, not on the CLI's argv (#1647, #1669). Before the user
+      // spread, so a client's own `mcpServersDelivery`/`settingsDelivery` wins.
+      ...cliDelivery(userProvidedOptions?.extraArgs),
       ...userProvidedOptions,
       ...(settings && { settings }),
       env,
@@ -10817,12 +10968,18 @@ function isValidBaseUrl(baseUrl: string): boolean {
 // personas, so we filter them out and only surface the Agent picker when the
 // user (or a plugin/project) has configured custom agents. Update this set if
 // the SDK's built-in roster changes.
+// Upstream #1672: `web-fetch` (listed only where its staged rollout or
+// `CLAUDE_CODE_WEB_FETCH_AGENT=1` turns it on) and `claude-code-guide` (listed
+// only where `CLAUDE_CODE_ENTRYPOINT` is set) are built in too, so they stay out
+// of the Agent picker like the rest.
 export const BUILTIN_AGENT_NAMES = new Set([
   "claude",
   "general-purpose",
   "Explore",
   "Plan",
   "statusline-setup",
+  "claude-code-guide",
+  "web-fetch",
 ]);
 
 // Value of the synthetic "Default" entry in the agent picker, which maps to the
@@ -10912,6 +11069,41 @@ export function explainFastModeDisabledReason(
  *  newer SDK adds), else `undefined`. State comparisons (see
  *  `syncFastModeState`) then track exactly what the user can see, so
  *  `sdk_opt_in_required` and `pending` never churn the config option. */
+/** Set Claude Code's Fast mode flag through `applyFlagSettings` (upstream #1637).
+ *
+ *  Turning it on sends `fastMode: false` first, a workaround for Claude Code (CLI 2.1.325): it
+ *  acts on `fastMode: true` only when its flag does not already hold `true`. Its flag stays
+ *  `true` while it stops serving Fast mode at a model switch (Fable 5.2 takes only a Fast mode
+ *  turned on while it was selected) and reports `fast_mode_state: "off"`; without the reset,
+ *  turning the toggle back on changes nothing and the next init turns it off again. */
+export async function applyFastModeFlag(
+  applyFlagSettings: (settings: { fastMode: boolean }) => Promise<void>,
+  enabled: boolean,
+): Promise<void> {
+  if (enabled) await applyFlagSettings({ fastMode: false });
+  await applyFlagSettings({ fastMode: enabled });
+}
+
+/** A Fast mode report of Claude Code: the state and reason of a `system`/init or a result. */
+export type FastModeReport = {
+  state: FastModeState | undefined;
+  reason: FastModeDisabledReason | undefined;
+};
+
+/** Whether a result's Fast mode report says something its turn's init did not (upstream
+ *  #1637). Reasons compare normalized: turning Fast mode on mid-turn drops
+ *  `sdk_opt_in_required` from the result, which is no news. True without an init. */
+export function fastModeResultIsNews(
+  init: FastModeReport | undefined,
+  result: FastModeReport,
+): boolean {
+  if (init === undefined) return true;
+  return (
+    result.state !== init.state ||
+    normalizeFastModeDisabledReason(result.reason) !== normalizeFastModeDisabledReason(init.reason)
+  );
+}
+
 export function normalizeFastModeDisabledReason(
   reason: FastModeDisabledReason | undefined,
 ): FastModeDisabledReason | undefined {

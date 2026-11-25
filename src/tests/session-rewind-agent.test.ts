@@ -126,4 +126,17 @@ describe("session/fork with a cut point", () => {
       forkSession: true,
     });
   });
+
+  it("rejects a cursorId it did not issue with -32602 and copies nothing (#1655)", async () => {
+    const agent = createAgent();
+    const createSession = vi
+      .spyOn(agent as any, "createSession")
+      .mockResolvedValue({ sessionId: "forked-session" });
+
+    await expect(
+      agent.unstable_forkSession({ sessionId: "s1", cwd: "/test", mcpServers: [], cursorId: "c1" }),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(sdk.forkSession).not.toHaveBeenCalled();
+  });
 });
