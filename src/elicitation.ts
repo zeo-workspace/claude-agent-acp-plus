@@ -471,3 +471,13 @@ export function refusalFallbackResultFromResponse(response: CreateElicitationRes
   const choice = acceptedElicitationContent(response)[REFUSAL_FALLBACK_CHOICE_KEY];
   return choice === RETRY_FALLBACK_RESULT ? RETRY_FALLBACK_RESULT : KEEP_REFUSAL_RESULT;
 }
+
+/**
+ * Whether `toolUseID` is the id of a question Claude Code asks on its own (its `confirmWithUser`),
+ * such as whether to download a connector's file (upstream #1644). It asks through `canUseTool` as
+ * AskUserQuestion under a `confirm_<uuid>` id and reads the answer from the callback's result: no
+ * tool_use and no tool_result of the stream carry that id, so nothing else ends its tool call.
+ */
+export function isConfirmQuestion(toolUseID: string): boolean {
+  return toolUseID.startsWith("confirm_");
+}

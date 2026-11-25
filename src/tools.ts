@@ -585,13 +585,33 @@ export function toolInfoFromToolUse(
       };
     }
 
-    default:
+    default: {
+      // Upstream #1674: clients show `title`, so an MCP call reads `github: create_issue`
+      // rather than `mcp__github__create_issue`; the raw name stays in `_meta.claudeCode.toolName`.
+      const mcp = mcpToolName(name);
       return {
-        title: name || "Unknown Tool",
+        title: mcp ? `${mcp.server}: ${mcp.tool}` : name || "Unknown Tool",
         kind: "other",
         content: [],
       };
+    }
   }
+}
+
+/**
+ * Splits `mcp__<server>__<tool>` the way Claude Code does (upstream #1674): the server is the
+ * segment up to the next `__`, the tool is the whole rest, so a `__` inside the tool survives.
+ * An incomplete name is not an MCP name.
+ */
+export function mcpToolName(name: string): { server: string; tool: string } | undefined {
+  const prefix = "mcp__";
+  if (!name.startsWith(prefix)) return undefined;
+  const rest = name.slice(prefix.length);
+  const separator = rest.indexOf("__");
+  if (separator <= 0) return undefined;
+  const tool = rest.slice(separator + 2);
+  if (!tool) return undefined;
+  return { server: rest.slice(0, separator), tool };
 }
 
 /**

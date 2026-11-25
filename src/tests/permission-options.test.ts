@@ -628,7 +628,7 @@ describe("Claude permission options and response mapping", () => {
     expect(result.behavior === "allow" && result.updatedPermissions).toEqual(changeSet?.updates);
   });
 
-  it("reuses the Computer Use MCP tool-call title", () => {
+  it("reuses the Computer Use MCP tool-call title, in its readable form (#1674)", () => {
     expect(
       buildClaudePermissionPresentation({
         toolName: "mcp__computer-use__screenshot",
@@ -636,7 +636,7 @@ describe("Claude permission options and response mapping", () => {
         toolUseID: "tool-computer-use",
       })._meta,
     ).toEqual({
-      permission: { version: 1, title: "mcp__computer-use__screenshot" },
+      permission: { version: 1, title: "computer-use: screenshot" },
     });
   });
 

@@ -12,6 +12,8 @@ import {
   FAST_MODE_ON,
   FAST_MODE_OFF,
   ClaudeAcpAgent,
+  applyFastModeFlag,
+  fastModeResultIsNews,
   type AcpClient,
 } from "../acp-agent.js";
 
@@ -653,5 +655,33 @@ describe("fast-mode overage refused", async () => {
           (u.update as any).sessionUpdate === "notice" && JSON.stringify(u).includes(OVERAGE_TEXT),
       ),
     ).toBe(true);
+  });
+});
+
+describe("Fast mode after a model switch and mid-turn (#1637)", () => {
+  it("turning on resets the flag first, so a repeated on takes effect", async () => {
+    const calls: Array<{ fastMode: boolean }> = [];
+    await applyFastModeFlag(async (settings) => {
+      calls.push(settings);
+    }, true);
+    expect(calls).toEqual([{ fastMode: false }, { fastMode: true }]);
+    calls.length = 0;
+    await applyFastModeFlag(async (settings) => {
+      calls.push(settings);
+    }, false);
+    expect(calls).toEqual([{ fastMode: false }]);
+  });
+
+  it("a result that repeats its init is not news; one that adds a refusal is", () => {
+    const init = { state: "off" as const, reason: undefined };
+    expect(fastModeResultIsNews(init, { state: "off", reason: undefined })).toBe(false);
+    expect(fastModeResultIsNews(init, { state: "on", reason: undefined })).toBe(true);
+    expect(
+      fastModeResultIsNews(init, {
+        state: "off",
+        reason: "extra_usage_disabled" as FastModeDisabledReason,
+      }),
+    ).toBe(true);
+    expect(fastModeResultIsNews(undefined, { state: "off", reason: undefined })).toBe(true);
   });
 });

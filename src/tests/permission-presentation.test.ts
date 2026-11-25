@@ -352,7 +352,7 @@ describe("Claude permission ACP v1 presentation", () => {
     ]);
   });
 
-  it("reuses the standard title for an unknown tool", () => {
+  it("reuses the standard title for an unknown tool, in its readable MCP form (#1674)", () => {
     const presentation = buildClaudePermissionPresentation({
       toolName: "mcp__demo__deploy",
       input: { target: "staging" },
@@ -360,7 +360,7 @@ describe("Claude permission ACP v1 presentation", () => {
     });
     expect(presentation.toolCall).toMatchObject({ kind: "other", name: "mcp__demo__deploy" });
     expect(presentation._meta).toEqual({
-      permission: { version: 1, title: "mcp__demo__deploy" },
+      permission: { version: 1, title: "demo: deploy" },
     });
   });
 });
