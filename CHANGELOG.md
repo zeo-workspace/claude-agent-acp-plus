@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.40.2](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.40.1...v0.40.2) (2026-11-25)
+
+
+### Bug Fixes
+
+* **mode:** record the permission mode Claude Code says is in effect; agent SDK 0.3.332 ([#246](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/246)) ([992ea76](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/992ea7688b6b959c787719fa492d317aeac72d8a))
+
+
+### Miscellaneous Chores
+
+* **deps:** bump @babel/runtime from 7.29.13 to 7.29.15 ([#243](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/243)) ([12a180f](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/12a180fc0896aa6892dcda80eee74845edc35b97))
+* **deps:** bump encodeurl from 2.0.1 to 2.0.3 ([#244](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/244)) ([e5c9f88](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/e5c9f8890afd811be5fe7b7dfc09be76f0c8a892))
+* **deps:** bump google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml ([#238](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/238)) ([88df52f](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/88df52fc02e1b12f8fff0e6629106ea0b3ccf6f3))
+* **deps:** bump the minor group across 1 directory with 44 updates ([#247](https://github.com/zeo-workspace/claude-agent-acp-plus/issues/247)) ([8fcc9fa](https://github.com/zeo-workspace/claude-agent-acp-plus/commit/8fcc9fa4004dd6883c06c41e06c47cf0349e3ec9))
+
 ## [0.40.1](https://github.com/zeo-workspace/claude-agent-acp-plus/compare/v0.40.0...v0.40.1) (2026-11-25)
 
 
