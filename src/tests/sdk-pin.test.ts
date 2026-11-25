@@ -57,6 +57,8 @@ import { fileURLToPath } from "node:url";
  *     worktree sandbox escape), and background Bash commands that finish at once
  *     no longer lose their output.
  *
+ *   - **0.3.331 -> 0.3.332, 2026-11-25, by hand.** `setPermissionMode()` names the mode now
+ *     in effect, which session-mode.ts records instead of the one asked for.
  *   - **0.3.325 -> 0.3.331, 2026-11-24, by hand (parity round 26, item 232).**
  *     With ACP SDK 2.12.0; the cooldown is waived by the operator (2026-11-19).
  *   - **0.3.319 -> 0.3.325, 2026-11-13, by hand (parity round 25, item 215).**
@@ -100,7 +102,7 @@ const MIRROR_ROOT = join(HERE, "..", "..");
 const FORK_ROOT = join(MIRROR_ROOT, "..", "fork");
 
 const SDK = "@anthropic-ai/claude-agent-sdk";
-const PINNED = "0.3.331";
+const PINNED = "0.3.332";
 
 function readJson(path: string): Record<string, any> {
   return JSON.parse(readFileSync(path, "utf8"));

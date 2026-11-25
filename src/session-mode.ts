@@ -217,9 +217,20 @@ export class SessionModeManager<S extends SessionMode> {
       throw new Error(`Mode ${modeId} is not available in this session`);
     }
 
-    const effectiveMode = this.effectiveMode(session, requestedMode);
+    const askedMode = this.effectiveMode(session, requestedMode);
+    let effectiveMode = askedMode;
     try {
-      await session.query.setPermissionMode(effectiveMode);
+      // SDK 0.3.332: the answer names the mode now in effect, which can differ from the one asked
+      // for. Record that one, so the client never shows a mode stricter or looser than the one in
+      // force; `undefined` (no mode named) leaves the asked mode as the best guess.
+      const applied = await session.query.setPermissionMode(askedMode);
+      if (applied?.mode !== undefined && applied.mode !== askedMode) {
+        this.options.logError(
+          `[session/mode] sessionId=${sessionId} event=mode-differs asked=${askedMode} inEffect=${applied.mode}`,
+          undefined,
+        );
+        effectiveMode = applied.mode;
+      }
     } catch (error) {
       if (error instanceof Error) {
         if (!error.message) error.message = "Invalid Mode";
@@ -229,7 +240,7 @@ export class SessionModeManager<S extends SessionMode> {
       throw new Error("Invalid Mode");
     }
 
-    if (effectiveMode !== requestedMode) {
+    if (askedMode !== requestedMode) {
       await this.publishFallbackWarning(sessionId, session);
     }
     return effectiveMode;

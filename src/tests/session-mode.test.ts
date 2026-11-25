@@ -58,6 +58,27 @@ describe("session mode", () => {
     expect(session.query.setPermissionMode).toHaveBeenCalledWith("plan");
   });
 
+  it("records the mode Claude Code says is in effect, not the one asked for (SDK 0.3.332)", async () => {
+    const session = createSession({
+      query: { setPermissionMode: vi.fn(async () => ({ mode: "default" as const })) },
+    });
+    const updates: SessionNotification[] = [];
+    const { manager, updateConfigOption } = createManager(session, updates);
+    await manager.setSessionMode({ sessionId: SESSION_ID, modeId: "acceptEdits" });
+    expect(session.query.setPermissionMode).toHaveBeenCalledWith("acceptEdits");
+    expect(updateConfigOption).toHaveBeenCalledWith(SESSION_ID, "mode", "default");
+    expect(updates.map((u) => u.update)).toContainEqual({
+      sessionUpdate: "current_mode_update",
+      currentModeId: "default",
+    });
+  });
+
+  it("keeps the asked mode when the answer names none", async () => {
+    const session = createSession({ query: { setPermissionMode: vi.fn(async () => undefined) } });
+    const { manager } = createManager(session);
+    await expect(manager.selectMode(SESSION_ID, "plan")).resolves.toBe("plan");
+  });
+
   it("rejects invalid and unavailable modes before touching the query", async () => {
     const session = createSession();
     const { manager } = createManager(session);
